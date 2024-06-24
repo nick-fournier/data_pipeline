@@ -1,0 +1,32 @@
+[tool.poetry]
+name = "data-pipeline"
+version = "0.1.0"
+description = ""
+authors = ["Nick Fournier <nichfournier@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.13"
+dagster = "^1.7.10"
+dagster-webserver = "^1.7.10"
+polars = "^0.20.31"
+dagster-duckdb-polars = "^0.23.10"
+xlsx2csv = "^0.8.2"
+yahooquery = "^2.3.7"
+sshtunnel = "^0.4.0"
+connectorx = "^0.3.3"
+python-dotenv = "^1.0.1"
+dagster-postgres = "^0.23.10"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+# [build-system]
+# requires = ["setuptools"]
+# build-backend = "setuptools.build_meta"
+
+[tool.dagster]
+module_name = "data_pipeline"
+

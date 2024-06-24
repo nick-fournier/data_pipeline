@@ -1,3 +1,13 @@
+# Dagster
+*.db
+*.complete
+*.err
+*.out
+*/storage
+*/schedules
+*/history
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
