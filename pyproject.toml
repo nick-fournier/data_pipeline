@@ -17,7 +17,13 @@ sshtunnel = "^0.4.0"
 connectorx = "^0.3.3"
 python-dotenv = "^1.0.1"
 dagster-postgres = "^0.23.10"
+ruff = "^0.4.10"
 
+[tool.ruff.lint]
+select = ["ALL"]
+
+[tool.ruff]
+line-length = 100
 
 [build-system]
 requires = ["poetry-core"]
