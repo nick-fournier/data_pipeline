@@ -1,3 +1,4 @@
+*.~lock*
 # Dagster
 *.db
 *.complete
