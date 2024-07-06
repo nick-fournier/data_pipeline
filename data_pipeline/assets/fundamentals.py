@@ -89,12 +89,26 @@ def fetch_fundamentals(new_stocks: pl.DataFrame) -> pl.DataFrame:
     )
 
     field_map = {camel_case(k): k for k in Fundamentals.__annotations__}
+
+    valuation_measures = pl.DataFrame(
+        yq_request.valuation_measures.reset_index(),
+    )
+    valuation_measures = valuation_measures.select(
+        [x for x in field_map if x in valuation_measures.columns],
+    )
+
     fundamentals_df = pl.DataFrame(
         yq_request.get_financial_data(
             types=list(field_map.keys()),
             frequency="q",
             trailing=True,
         ).reset_index(),
+    )
+
+    fundamentals_df = fundamentals_df.join(
+        valuation_measures,
+        on=["symbol", "asOfDate", "periodType"],
+        how="left",
     )
 
     # Rename columns

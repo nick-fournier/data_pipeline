@@ -6,7 +6,9 @@ exceptions: dict = {
     "periodType": "period_type",
     "currencyCode": "currency_code",
     "asOfDate": "as_of_date",
+    "EnterprisesValueEBITDARatio": "enterprises_value_ebitda_ratio",
 }
+
 _exceptions = {v: k for k, v in exceptions.items()}
 
 def camel_case(field: str) -> str:

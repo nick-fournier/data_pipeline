@@ -34,13 +34,13 @@ def _append_new_data(
             status=pl.lit("existing"),
         )
         if not existing_keys.is_empty():
-            _new_data = (
+            new_data = (
                 new_data.join(existing_keys, on=pk, how="left")
                 .filter(pl.col("status").is_null())
                 .drop("status")
             )
 
-    _new_data.write_database(table_name, uri, if_table_exists="append")
+    new_data.write_database(table_name, uri, if_table_exists="append")
 
 
 def _remove_stocks(uri: str, table_name: str, removed_stocks: pl.Series) -> None:
