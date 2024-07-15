@@ -9,6 +9,7 @@ from data_pipeline.resources.configs import Params
 @asset(
     description="""Fetches the latest stock symbols from the NASDAQ
     screener of NYSE, AMEX, and NASDAQ stocks""",
+    # io_manager_key="pgio_manager",
     )
 def stock_listings() -> pl.DataFrame:
     """Fetch latest stock screener from NASDAQ.

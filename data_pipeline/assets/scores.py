@@ -32,11 +32,48 @@ a stronger financial position.
 - P/E = Price / EPS
 
 """
+from __future__ import annotations
+
 import polars as pl
 from dagster import asset
 
+NEG_SCORE_COLS = ("delta_long_lev_ratio", "delta_shares")
+POS_SCORE_COLS = (
+            "roa",
+            "delta_cash",
+            "delta_roa",
+            "accruals",
+            "delta_current_lev_ratio",
+            "delta_gross_margin",
+            "delta_asset_turnover",
+)
 
-def calc_measures(fundamentals: pl.DataFrame) -> pl.DataFrame:
+class PFScoreMeasures:
+    """Column score function expressions."""
+
+    roa: pl.Expr = pl.col("net_income") / pl.col("total_assets")
+    delta_cash: pl.Expr = pl.col("cash_and_cash_equivalents").pct_change()
+    delta_roa: pl.Expr = pl.col("roa").pct_change()
+    accruals: pl.Expr = pl.col("cash_and_cash_equivalents") / pl.col("current_assets")
+    delta_long_lev_ratio: pl.Expr = (
+        pl.col("total_liabilities_net_minority_interest") / pl.col("total_assets")
+        ).pct_change()
+    delta_current_lev_ratio: pl.Expr = (
+        pl.col("current_liabilities") / pl.col("current_assets")
+        ).pct_change()
+    delta_shares: pl.Expr = pl.col("capital_stock").pct_change()
+    delta_gross_margin: pl.Expr = (
+        pl.col("gross_profit") / pl.col("total_revenue")
+        ).pct_change()
+    delta_asset_turnover: pl.Expr = (
+        pl.col("total_revenue") / (pl.col("total_assets") + pl.col("total_assets").shift(-1)) / 2
+        )
+    cash_ratio: pl.Expr = pl.col("cash_and_cash_equivalents") / pl.col("current_assets")
+    eps: pl.Expr = pl.col("net_income") / pl.col("capital_stock")
+    book_value: pl.Expr = pl.col("total_assets") - pl.col("total_liabilities_net_minority_interest")
+
+
+def calc_pf_measures(fundamentals: pl.DataFrame) -> pl.DataFrame:
     """Calculate the financial measures for the Piotroski F-Score.
 
     Profitability
@@ -48,7 +85,7 @@ def calc_measures(fundamentals: pl.DataFrame) -> pl.DataFrame:
     Leverage, Liquidity and Source of Funds
     - Long term leverage ratio | 1 if negative (lower than last year)
     - Current leverage ratio | 1 point if positive (higher than last year)
-    - Change in shares | 1 if no no shares (<=0)
+    - Change in shares | 1 if no new shares (<=0)
 
     Operating Efficiency
     - Gross margin | 1 if positive (higher than last year)
@@ -65,60 +102,33 @@ def calc_measures(fundamentals: pl.DataFrame) -> pl.DataFrame:
         pl.DataFrame: The calculated financial measures
 
     """
-    # Define the financial measures
-    roa = (pl.col("net_income") / pl.col("total_assets")).alias("roa")
+    _fundamentals = fundamentals
+    for name in PFScoreMeasures.__annotations__:
+        named_expr = {name: getattr(PFScoreMeasures, name)}
+        _fundamentals = _fundamentals.with_columns(**named_expr)
+        _fundamentals = _fundamentals.with_columns(
+            **{name: pl.when(pl.col(name).is_infinite()).then(None).otherwise(pl.col(name))},
+        )
 
-    delta_cash = pl.col("cash").pct_change().alias("delta_cash")
+    return _fundamentals.fill_nan(None)
 
-    delta_roa = pl.col("roa").pct_change().alias("delta_roa")
 
-    accruals = (pl.col("cash") / pl.col("current_assets")).alias("accruals")
+def z_score_df(df: pl.DataFrame) -> pl.DataFrame:
+    """Calculate the z-score for a given DataFrame.
 
-    delta_long_lev_ratio = (
-        pl.col("total_liabilities") / pl.col("total_assets")
-    ).pct_change().alias("delta_long_lev_ratio")
+    Args:
+    ----
+        df (pl.DataFrame): The DataFrame to calculate the z-score for
 
-    delta_current_lev_ratio = (
-        pl.col("current_liabilities") / pl.col("current_assets")
-    ).pct_change().alias("delta_current_lev_ratio")
+    Returns:
+    -------
+        pl.DataFrame: The DataFrame with the z-score calculated
 
-    delta_shares = pl.col("shares_outstanding").pct_change().alias("delta_shares")
-
-    delta_gross_margin = (
-        pl.col("gross_profit") / pl.col("total_revenue")
-    ).pct_change().alias("delta_gross_margin")
-
-    delta_asset_turnover = (
-        pl.col("total_revenue") / (
-            pl.col("total_assets") + pl.col("total_assets").shift(-1)
-        ) / 2
-    ).alias("delta_asset_turnover")
-
-    cash_ratio = (pl.col("cash") / pl.col("current_assets")).alias("cash_ratio")
-
-    eps = (pl.col("net_income") / pl.col("shares_outstanding")).alias("eps")
-
-    book_value = (
-        pl.col("total_assets") - pl.col("total_liabilities")
-    ).alias("book_value")
-
-    # Return the calculated financial measures
-    return fundamentals.with_columns(
-        [
-            roa,
-            delta_cash,
-            delta_roa,
-            accruals,
-            delta_long_lev_ratio,
-            delta_current_lev_ratio,
-            delta_shares,
-            delta_gross_margin,
-            delta_asset_turnover,
-            cash_ratio,
-            eps,
-            book_value,
-        ],
-    )
+    """
+    return df.select([
+        ((pl.col(col) - pl.col(col).mean()) / pl.col(col).std()).alias(col)
+        for col in df.columns # if pl.col(col).is_numeric()
+    ])
 
 
 @asset
@@ -134,6 +144,34 @@ def piotroski_scores(updated_fundamentals: pl.DataFrame) -> pl.DataFrame:
         pl.DataFrame: The Piotroski F-Score for the stock symbols
 
     """
-    measures_df = calc_measures(updated_fundamentals)
+    # Select symbol with missing scores
+    missing_measures = updated_fundamentals.filter(
+        pl.col("pf_score").is_null() | pl.col("pf_score_weighted").is_null(),
+    )
 
-    return measures_df
+    measures = calc_pf_measures(missing_measures)
+
+    scoring = {
+        **{k: (pl.col(k) > 0).cast(pl.Int8).fill_null(0) for k in POS_SCORE_COLS},
+        **{k: (pl.col(k) <= 0).cast(pl.Int8).fill_null(0) for k in NEG_SCORE_COLS},
+    }
+
+    measures_matrix = measures.with_columns(
+        **{
+            k: pl.when(pl.col(k) < 0).then(pl.col(k) * -1).otherwise(pl.col(k))
+            for k in NEG_SCORE_COLS
+        },
+    ).select(POS_SCORE_COLS + NEG_SCORE_COLS)
+
+    score_matrix = measures.with_columns(**scoring).select(POS_SCORE_COLS + NEG_SCORE_COLS)
+
+    scores = measures.with_columns(
+        pf_score = score_matrix.sum(axis=1),
+        pf_score_weighted = (score_matrix * measures_matrix + 1).sum(axis=1),
+    )
+
+    return scores.select([
+        "symbol", "as_of_date", "period_type", "pf_score", "pf_score_weighted",
+        *list(scoring.keys()),
+        ])
+

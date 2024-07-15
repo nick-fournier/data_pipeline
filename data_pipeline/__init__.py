@@ -3,14 +3,17 @@
 
 from dagster import Definitions, load_assets_from_modules
 
-# from dagster_duckdb_polars import DuckDBPolarsIOManager  # noqa: ERA001
+from data_pipeline.resources.dbconn import ConfigurablePostgresIOManager
+
 from .assets import (
     fundamentals,
     scores,
     security_profiles,
     stock_listing,
 )
-from .resources.dbconn import PostgresConfig
+
+PGIOManager = ConfigurablePostgresIOManager(
+)
 
 all_assets = load_assets_from_modules([
         stock_listing,
@@ -22,7 +25,8 @@ all_assets = load_assets_from_modules([
 defs = Definitions(
     assets=all_assets,
     resources={
-        # "io_manager": DuckDBPolarsIOManager(database="data_pipeline.db"),  # noqa: ERA001
-        "postgres": PostgresConfig(),
+        # "io_manager": DuckDBPolarsIOManager(database=db_uri),
+        # "postgres": PostgresConfig(),
+        "pgio_manager": PGIOManager,
     },
 )

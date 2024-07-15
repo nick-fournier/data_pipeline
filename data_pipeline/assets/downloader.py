@@ -54,13 +54,17 @@ def download_stock_data(
             if downloaded_df.is_empty():
                 continue
 
-        except ValueError as e:
-            err = f"Error: {e}"
-            logger.exception(err)
-
-        pg_config.tunneled(
-            _append_new_data,
-            table_name=output_table,
-            new_data=downloaded_df,
-            pk=pk,
+            pg_config.tunneled(
+                _append_new_data,
+                table_name=output_table,
+                new_data=downloaded_df,
+                pk=pk,
             )
+
+        except (ValueError, AttributeError) as e:
+            err = f"""
+            Caught Error for symbols:\n
+            {_chunk["symbol"][:10].to_list()}...\n
+            with error: {e}
+            """
+            logger.exception(err)

@@ -2,16 +2,36 @@
 """Module contains assets related to fundamentals data processing."""
 from __future__ import annotations
 
+import logging
+
+import pandas as pd
 import polars as pl
 import yahooquery as yq
 from dagster import asset
 
 from data_pipeline.assets.downloader import download_stock_data
-from data_pipeline.resources.configs import Fundamentals
+from data_pipeline.assets.scores import PFScoreMeasures
 from data_pipeline.resources.dbconn import PostgresConfig
 from data_pipeline.resources.dbtools import _read_table
+from data_pipeline.resources.models import Fundamentals
 from data_pipeline.utils import camel_case
 
+logger = logging.getLogger(__name__)
+
+
+VAL_MEASURE_FIELDS = [
+    "enterprise_value",
+    "enterprises_value_ebitda_ratio",
+    "enterprises_value_revenue_ratio",
+    "forward_pe_ratio",
+    "market_cap",
+    "pb_ratio",
+    "pe_ratio",
+    "peg_ratio",
+    "ps_ratio",
+]
+
+SCORE_FIELDS = list(PFScoreMeasures.__annotations__.keys())
 
 def _retrieve_outdated_fundamentals(
     uri: str,
@@ -88,45 +108,44 @@ def fetch_fundamentals(new_stocks: pl.DataFrame) -> pl.DataFrame:
         validate=True,
     )
 
-    field_map = {camel_case(k): k for k in Fundamentals.__annotations__}
+    fndmtl_fields = {}
+    valmes_fields = {}
+    for k in Fundamentals.__annotations__:
+        if k in VAL_MEASURE_FIELDS:
+            valmes_fields[camel_case(k)] = k
+        elif k not in SCORE_FIELDS and k not in VAL_MEASURE_FIELDS:
+            fndmtl_fields[camel_case(k)] = k
 
-    valuation_measures = pl.DataFrame(
+    _valuation_measures_df = pl.DataFrame(
         yq_request.valuation_measures.reset_index(),
     )
-    valuation_measures = valuation_measures.select(
-        [x for x in field_map if x in valuation_measures.columns],
-    )
 
-    fundamentals_df = pl.DataFrame(
-        yq_request.get_financial_data(
-            types=list(field_map.keys()),
+    response = yq_request.get_financial_data(
+            types=list(fndmtl_fields.keys()),
             frequency="q",
             trailing=True,
-        ).reset_index(),
-    )
-
-    fundamentals_df = fundamentals_df.join(
-        valuation_measures,
-        on=["symbol", "asOfDate", "periodType"],
-        how="left",
-    )
-
-    # Rename columns
-    fundamentals_df = fundamentals_df.rename(field_map)
-
-    # Coerce columns to correct data types
-    for col in Fundamentals.__annotations__:
-        pl_type = getattr(pl, Fundamentals.__annotations__[col].split(".")[1])
-        fundamentals_df = fundamentals_df.with_columns(
-            fundamentals_df[col].cast(pl_type),
         )
 
-    return fundamentals_df
+    if not isinstance(response, pd.DataFrame):
+        msg = f"Failed to fetch financial data from Yahoo Finance, skipping: {response}"
+        logger.error(msg)
+        return pl.DataFrame()
+
+    _financials_df = pl.DataFrame(response.reset_index())
+
+    # Join the two DataFrames and rename columns
+    _fundamentals_df = _financials_df.join(
+        _valuation_measures_df,
+        on=["symbol", "asOfDate", "periodType"],
+        how="left",
+    ).rename({**fndmtl_fields, **valmes_fields}).lazy()
+
+    # Validate the DataFrame
+    return Fundamentals.validate(_fundamentals_df).collect() # type: ignore
 
 
 @asset(
     description="Update company fundamentals from Yahoo Finance",
-    required_resource_keys={"postgres"},
 )
 def updated_fundamentals(
     updated_security_profiles: pl.DataFrame,

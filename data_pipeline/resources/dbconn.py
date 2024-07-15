@@ -2,12 +2,22 @@
 """Module contains database connection resources."""
 import os
 
-from dagster import ConfigurableResource
+from dagster import (
+    ConfigurableIOManagerFactory,
+    ConfigurableResource,
+    InputContext,
+    IOManager,
+    OutputContext,
+)
 from dotenv import load_dotenv
+from sqlalchemy import create_engine, insert
+from sqlalchemy.orm import scoped_session, sessionmaker
 from sshtunnel import SSHTunnelForwarder
 
 load_dotenv("data_pipeline/.env")
 
+# TODO: Merge the PostgresConfig and PostgresIOManager classes into a single class
+# so that tunneling is handled by the IOManager
 
 class PostgresConfig(ConfigurableResource):
     """Resource for connecting to a Postgres database.
@@ -29,7 +39,17 @@ class PostgresConfig(ConfigurableResource):
     pg_port: int = int(os.getenv("POSTGRES_PORT", 22))  # noqa: PLW1508
     pg_database: str = os.getenv("POSTGRES_DB", "")
 
-    def connect(self) -> SSHTunnelForwarder:  # noqa: ANN101
+
+    def db_uri(self) -> str:
+        return "postgresql://{}:{}@{}:{}/{}".format(
+            os.getenv("POSTGRES_USER"),
+            os.getenv("POSTGRES_PASS"),
+            self.pg_host,
+            self.pg_port,
+            self.pg_database,
+        )
+
+    def connect(self) -> SSHTunnelForwarder:
         """Create an SSH tunnel to the Postgres database.
 
         This function creates an SSH tunnel to the Postgres database using the connection details
@@ -47,7 +67,7 @@ class PostgresConfig(ConfigurableResource):
             remote_bind_address=(self.pg_host, self.pg_port),
         )
 
-    def uri(self, tunnel: SSHTunnelForwarder) -> str:  # noqa: ANN101
+    def tunneled_uri(self, tunnel: SSHTunnelForwarder) -> str:
         """Create a connection URI to the Postgres database.
 
         This function creates a connection URI to the Postgres database using the connection details
@@ -69,7 +89,7 @@ class PostgresConfig(ConfigurableResource):
             self.pg_database,
         )
 
-    def tunneled(self, fn, **kwargs):  # noqa: ANN001, ANN003, ANN101, ANN201
+    def tunneled(self, fn, **kwargs):
         """Run a function with a tunnel to the Postgres database.
 
         This function creates a tunnel to the Postgres database and passes the
@@ -95,5 +115,54 @@ class PostgresConfig(ConfigurableResource):
             if not isinstance(tunnel, SSHTunnelForwarder):
                 msg = "Expected tunnel to be an instance of SSHTunnelForwarder"
                 raise TypeError(msg)
-            conn_uri = self.uri(tunnel)
+            conn_uri = self.tunneled_uri(tunnel)
             return fn(conn_uri, **kwargs)
+
+
+class PostgresIOManager(IOManager):
+    def __init__(self, connection_url):
+        self.engine = create_engine(connection_url)
+        self.Session = scoped_session(sessionmaker(bind=self.engine))
+
+    def handle_output(self, context: OutputContext, obj):
+        assert context.metadata is not None
+        model_class = context.metadata.get('write', None)
+        if model_class is None:
+            raise Exception("No write metadata found")
+
+        with self.Session() as session:
+            try:
+                session.execute(insert(model_class), obj)
+                session.commit()
+            except:
+                session.rollback()
+                raise
+            finally:
+                session.close()
+
+    def load_input(self, context: InputContext):
+        assert context.metadata is not None
+        model_class = context.metadata.get('read', None)
+        if model_class is None:
+            raise Exception("No read metadata found")
+
+        with self.Session() as session:
+            try:
+                result = session.query(model_class).all()
+            finally:
+                session.close()
+
+        return result
+
+
+class ConfigurablePostgresIOManager(ConfigurableIOManagerFactory):
+    username: str = os.getenv("POSTGRES_USER", "")
+    password: str = os.getenv("POSTGRES_PASS", "")
+    host: str = os.getenv("POSTGRES_HOST", "")
+    port: str = os.getenv("POSTGRES_PORT", "")
+    database: str = os.getenv("POSTGRES_DB", "")
+
+    def create_io_manager(self, context) -> IOManager:
+        connection_url = f"postgresql://{self.username}:{self.password}@{self.host}:{self.port}/{self.database}"
+        return PostgresIOManager(connection_url)
+

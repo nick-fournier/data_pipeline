@@ -9,12 +9,12 @@ import yahooquery as yq
 from dagster import asset
 
 from data_pipeline.assets.downloader import download_stock_data
-from data_pipeline.resources.configs import SecurityList
 from data_pipeline.resources.dbconn import PostgresConfig
 from data_pipeline.resources.dbtools import (
     _read_table,
     _remove_stocks,
 )
+from data_pipeline.resources.models import SecurityList
 from data_pipeline.utils import snake_case
 
 logger = logging.getLogger(__name__)
@@ -61,7 +61,6 @@ def fetch_profiles(
 
 @asset(
     description="Update security profiles from Yahoo Finance",
-    required_resource_keys={"postgres"},
 )
 def updated_security_profiles(
     stock_listings: pl.DataFrame,
@@ -106,7 +105,7 @@ def updated_security_profiles(
 
     if not new_stocks.is_empty():
         logger.info(
-            f"Downloading {new_stocks.shape[0]} stock profiles",  # noqa: G004
+            f"Downloading {new_stocks.shape[0]} stock profiles",
         )
 
         download_stock_data(
