@@ -2,11 +2,11 @@
 """Module contains database connection resources."""
 import os
 
+import polars as pl
 from dagster import (
-    ConfigurableIOManagerFactory,
+    ConfigurableIOManager,
     ConfigurableResource,
     InputContext,
-    IOManager,
     OutputContext,
 )
 from dotenv import load_dotenv
@@ -119,20 +119,34 @@ class PostgresConfig(ConfigurableResource):
             return fn(conn_uri, **kwargs)
 
 
-class PostgresIOManager(IOManager):
-    def __init__(self, connection_url):
-        self.engine = create_engine(connection_url)
+class PostgresPolarsIOManager(ConfigurableIOManager):
+    username: str = os.getenv("POSTGRES_USER", "")
+    password: str = os.getenv("POSTGRES_PASS", "")
+    host: str = os.getenv("POSTGRES_HOST", "")
+    port: str = os.getenv("POSTGRES_PORT", "")
+    database: str = os.getenv("POSTGRES_DB", "")
+
+    def __init__(self):
+        for attr in ["username", "password", "host", "port", "database"]:
+            assert getattr(self, attr) != "", f"Missing {attr} environment variable"
+
+
+        self.connection_url = f"postgresql://{self.username}:{self.password}@{self.host}:{self.port}/{self.database}"
+        self.engine = create_engine(self.connection_url)
         self.Session = scoped_session(sessionmaker(bind=self.engine))
 
-    def handle_output(self, context: OutputContext, obj):
-        assert context.metadata is not None
+    def handle_output(self, context: OutputContext, obj: pl.DataFrame):
+        assert context.metadata is not None, "No metadata found"
         model_class = context.metadata.get('write', None)
         if model_class is None:
             raise Exception("No write metadata found")
 
+        # Convert Polars DataFrame to a list of dictionaries
+        data = obj.to_dicts()
+
         with self.Session() as session:
             try:
-                session.execute(insert(model_class), obj)
+                session.execute(insert(model_class), data)
                 session.commit()
             except:
                 session.rollback()
@@ -140,8 +154,8 @@ class PostgresIOManager(IOManager):
             finally:
                 session.close()
 
-    def load_input(self, context: InputContext):
-        assert context.metadata is not None
+    def load_input(self, context: InputContext) -> pl.DataFrame:
+        assert context.metadata is not None, "No metadata found"
         model_class = context.metadata.get('read', None)
         if model_class is None:
             raise Exception("No read metadata found")
@@ -152,17 +166,7 @@ class PostgresIOManager(IOManager):
             finally:
                 session.close()
 
-        return result
-
-
-class ConfigurablePostgresIOManager(ConfigurableIOManagerFactory):
-    username: str = os.getenv("POSTGRES_USER", "")
-    password: str = os.getenv("POSTGRES_PASS", "")
-    host: str = os.getenv("POSTGRES_HOST", "")
-    port: str = os.getenv("POSTGRES_PORT", "")
-    database: str = os.getenv("POSTGRES_DB", "")
-
-    def create_io_manager(self, context) -> IOManager:
-        connection_url = f"postgresql://{self.username}:{self.password}@{self.host}:{self.port}/{self.database}"
-        return PostgresIOManager(connection_url)
+        # Convert the result to a Polars DataFrame
+        df = pl.DataFrame(result)
+        return df
 
