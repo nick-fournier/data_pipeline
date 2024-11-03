@@ -4,6 +4,9 @@ version = "0.1.0"
 description = ""
 authors = ["Nick Fournier <nichfournier@gmail.com>"]
 readme = "README.md"
+packages = [
+    {include = "data_pipeline"}
+]
 
 [tool.poetry.dependencies]
 python = ">=3.10,<3.13"
@@ -29,10 +32,6 @@ line-length = 100
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
-
-# [build-system]
-# requires = ["setuptools"]
-# build-backend = "setuptools.build_meta"
 
 [tool.dagster]
 module_name = "data_pipeline"

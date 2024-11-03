@@ -3,7 +3,7 @@
 import polars as pl
 from dagster import asset
 
-from data_pipeline.resources.configs import Params
+from ..resources.configs import Params
 
 
 @asset(
@@ -24,7 +24,7 @@ def stock_listings() -> pl.DataFrame:
     """
     stock_list = (
         pl.read_csv(
-            "data_pipeline/fixtures/nasdaq_screener_1718944810995.csv",
+            "data_pipeline/portfolio_optimizer/fixtures/nasdaq_screener_1718944810995.csv",
         )
         .rename(str.strip)
         .rename(str.lower)

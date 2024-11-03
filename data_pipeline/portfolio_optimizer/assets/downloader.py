@@ -8,9 +8,9 @@ from typing import Callable
 import polars as pl  # noqa: TCH002
 from tqdm import tqdm
 
-from data_pipeline.resources.configs import Params
-from data_pipeline.resources.dbconn import PostgresConfig  # noqa: TCH001
-from data_pipeline.resources.dbtools import _append_new_data
+from ..resources.configs import Params
+from ..resources.dbconn import PostgresConfig  # noqa: TCH001
+from ..resources.dbtools import _append_new_data
 
 logger = logging.getLogger(__name__)
 

@@ -9,12 +9,12 @@ import polars as pl
 import yahooquery as yq
 from dagster import asset
 
-from data_pipeline.assets.downloader import download_stock_data
-from data_pipeline.assets.scores import PFScoreMeasures
-from data_pipeline.resources.dbconn import PostgresConfig
-from data_pipeline.resources.dbtools import _read_table
-from data_pipeline.resources.models import Fundamentals
-from data_pipeline.utils import camel_case
+from ..resources.dbconn import PostgresConfig
+from ..resources.dbtools import _read_table
+from ..resources.models import Fundamentals
+from ..utils import camel_case
+from .downloader import download_stock_data
+from .scores import PFScoreMeasures
 
 logger = logging.getLogger(__name__)
 

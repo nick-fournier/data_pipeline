@@ -17,7 +17,7 @@
       "type": "python",
       "request": "launch",
       "module": "dagster",
-      "args": ["dev"],
+      "args": ["dev", "-w", "workspace.yml"],
       "subProcess": true,
       "console": "internalConsole",
       "internalConsoleOptions": "openOnSessionStart"

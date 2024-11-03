@@ -8,14 +8,14 @@ import polars as pl
 import yahooquery as yq
 from dagster import asset
 
-from data_pipeline.assets.downloader import download_stock_data
-from data_pipeline.resources.dbconn import PostgresConfig
-from data_pipeline.resources.dbtools import (
+from ..resources.dbconn import PostgresConfig
+from ..resources.dbtools import (
     _read_table,
     _remove_stocks,
 )
-from data_pipeline.resources.models import SecurityList
-from data_pipeline.utils import snake_case
+from ..resources.models import SecurityList
+from ..utils import snake_case
+from .downloader import download_stock_data
 
 logger = logging.getLogger(__name__)
 
