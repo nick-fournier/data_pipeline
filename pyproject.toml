@@ -12,8 +12,7 @@ packages = [
 python = ">=3.10,<3.13"
 dagster = "^1.7.10"
 dagster-webserver = "^1.7.10"
-polars = "^0.20.31"
-dagster-duckdb-polars = "^0.23.10"
+polars = "^1.0"
 xlsx2csv = "^0.8.2"
 yahooquery = "^2.3.7"
 sshtunnel = "^0.4.0"
@@ -21,7 +20,8 @@ connectorx = "^0.3.3"
 python-dotenv = "^1.0.1"
 dagster-postgres = "^0.23.10"
 ruff = "^0.4.10"
-pandera = {extras = ["polars"], version = "^0.20.1"}
+pandera = {extras = ["polars"], version = "^0.20.4"}
+pyarrow = "^18.0.0"
 
 [tool.ruff.lint]
 select = ["I", "E", "F", "W", "PL", "N", "RUF"]

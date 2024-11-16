@@ -1,3 +1,4 @@
+/dagster_home
 *.~lock*
 # Dagster
 *.db
@@ -7,7 +8,6 @@
 */storage
 */schedules
 */history
-
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
