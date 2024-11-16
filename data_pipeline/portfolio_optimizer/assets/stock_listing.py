@@ -11,7 +11,7 @@ from ..resources.configs import Params
     screener of NYSE, AMEX, and NASDAQ stocks""",
     # io_manager_key="pgio_manager",
     )
-def stock_listings() -> pl.DataFrame:
+def security_list() -> pl.DataFrame:
     """Fetch latest stock screener from NASDAQ.
 
     Fetches the latest stock market screener list from

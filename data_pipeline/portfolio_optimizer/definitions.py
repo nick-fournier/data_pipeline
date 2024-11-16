@@ -5,6 +5,7 @@ from dagster import Definitions, load_assets_from_modules
 
 # from data_pipeline.resources.dbconn import PostgresPolarsIOManager
 from data_pipeline.portfolio_optimizer.assets import (
+    forecast_returns,
     fundamentals,
     prices,
     scores,
@@ -18,6 +19,7 @@ all_assets = load_assets_from_modules([
         fundamentals,
         scores,
         prices,
+        forecast_returns,
     ])
 
 defs = Definitions(

@@ -190,8 +190,8 @@ def _update_fundamentals(
 @asset(
     description="Update company fundamentals from Yahoo Finance",
 )
-def updated_fundamentals(
-    updated_security_profiles: pl.DataFrame,
+def fundamentals(
+    security_profiles: pl.DataFrame,
 ) -> pl.DataFrame:
     """Update fundamentals database.
 
@@ -213,7 +213,7 @@ def updated_fundamentals(
     # Update fundamentals, tunnel through SSH to access database
     fundamentals = pg_config.tunneled(
         _update_fundamentals,
-        updated_security_profiles=updated_security_profiles,
+        updated_security_profiles=security_profiles,
     )
 
     return fundamentals

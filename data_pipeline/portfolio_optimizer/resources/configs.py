@@ -19,3 +19,10 @@ class Params(Config):
     PRICE_PERIOD: str = '5y'
     PRICE_INTERVAL: str = '1mo'
     FSCORE_CUTOFF: int = 7
+
+# class ForecastModel(Config):
+#         x_cols = [
+#             'roa', 'cash_ratio', 'delta_cash', 'delta_roa', 'accruals', 'delta_long_lev_ratio',
+#             'delta_current_lev_ratio', 'delta_shares', 'delta_gross_margin', 'delta_asset_turnover'
+#             ]
+

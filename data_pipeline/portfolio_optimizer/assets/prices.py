@@ -14,14 +14,14 @@ from ..resources.models import SecurityPrices
 def _update_stock_prices(
     uri: str,
     piotroski_scores: pl.DataFrame,
-    updated_fundamentals: pl.DataFrame
+    fundamentals: pl.DataFrame
     ) -> pl.DataFrame:
     """Download stock prices for stocks passing the criteria.
 
     Args:
         uri (str): The database URI
         piotroski_scores (pl.DataFrame): The Piotroski F-Score data
-        updated_fundamentals (pl.DataFrame): The updated fundamentals
+        fundamentals (pl.DataFrame): The updated fundamentals
 
     Returns:
         pl.DataFrame: The stock prices
@@ -30,9 +30,9 @@ def _update_stock_prices(
     # Get the configuration parameters
     params = Params()
 
-    # Join symbol from updated_fundamentals to piotroski_scores
+    # Join symbol from fundamentals to piotroski_scores
     piotroski_scores = piotroski_scores.join(
-        updated_fundamentals.select(['id', 'symbol']),
+        fundamentals.select(['id', 'symbol']),
         left_on='fundamentals_id',
         right_on='id',
         how='inner'
@@ -78,7 +78,7 @@ def _update_stock_prices(
 )
 def stock_prices(
     piotroski_scores: pl.DataFrame,
-    updated_fundamentals: pl.DataFrame
+    fundamentals: pl.DataFrame
     ) -> pl.DataFrame:
     """Download stock prices for stocks passing the criteria.
 
@@ -97,7 +97,7 @@ def stock_prices(
     prices = pg_config.tunneled(
         _update_stock_prices,
         piotroski_scores=piotroski_scores,
-        updated_fundamentals=updated_fundamentals
+        fundamentals=fundamentals
     )
 
     return prices

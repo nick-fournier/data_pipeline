@@ -135,14 +135,14 @@ def z_score_df(df: pl.DataFrame) -> pl.DataFrame:
     ])
 
 
-def _update_scores(uri: str, updated_fundamentals: pl.DataFrame) -> pl.DataFrame:
+def _update_scores(uri: str) -> pl.DataFrame:
     """Update scores (within SSH Tunnel)
 
     This is the working function that gets run within the SSH tunnel. This
     avoids having to reconnect repeatedly within this step.
 
     Args:
-        updated_fundamentals (pl.DataFrame): The updated fundamentals table.
+        fundamentals (pl.DataFrame): The updated fundamentals table.
 
     Returns:
         pl.DataFrame: The updated scores table.
@@ -206,12 +206,12 @@ def _update_scores(uri: str, updated_fundamentals: pl.DataFrame) -> pl.DataFrame
 
 
 @asset
-def piotroski_scores(updated_fundamentals: pl.DataFrame) -> pl.DataFrame:
+def piotroski_scores(fundamentals: pl.DataFrame) -> pl.DataFrame:
     """Calculate the Piotroski F-Score for a given stock symbol.
 
     Args:
     ----
-        updated_fundamentals (pl.DataFrame): The updated fundamentals data for the stock symbols
+        fundamentals (pl.DataFrame): The updated fundamentals data for the stock symbols
 
     Returns:
     -------
@@ -224,7 +224,6 @@ def piotroski_scores(updated_fundamentals: pl.DataFrame) -> pl.DataFrame:
 
     scores = pg_config.tunneled(
         _update_scores,
-        updated_fundamentals=updated_fundamentals,
     )
 
     return scores

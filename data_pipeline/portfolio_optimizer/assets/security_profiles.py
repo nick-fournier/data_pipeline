@@ -118,8 +118,8 @@ def _update_security_profiles(
 @asset(
     description="Update security profiles from Yahoo Finance",
 )
-def updated_security_profiles(
-    stock_listings: pl.DataFrame,
+def security_profiles(
+    security_list: pl.DataFrame,
 ) -> pl.DataFrame:
     """Update security list database.
 
@@ -141,7 +141,7 @@ def updated_security_profiles(
     # Update security profiles, tunnel through SSH to access database
     updated_securities = pg_config.tunneled(
         _update_security_profiles,
-        stock_listings=stock_listings,
+        stock_listings=security_list,
     )
 
     return updated_securities
