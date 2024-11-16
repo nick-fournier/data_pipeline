@@ -197,33 +197,33 @@ class SecurityPrices(pa.DataFrameModel):
         )
     open: pl.Float64 = pa.Field(
         description="The opening price of the stock",
-        nullable=False,
+        nullable=True, coerce=True,
         )
     high: pl.Float64 = pa.Field(
         description="The highest price of the stock",
-        nullable=False,
+        nullable=True, coerce=True,
         )
     low: pl.Float64 = pa.Field(
         description="The lowest price of the stock",
-        nullable=False,
+        nullable=True, coerce=True,
         )
     close: pl.Float64 = pa.Field(
         description="The closing price of the stock",
-        nullable=False,
+        nullable=True, coerce=True,
         )
     adjclose: pl.Float64 = pa.Field(
         description="The adjusted closing price of the stock",
-        nullable=False,
+        nullable=True, coerce=True,
         )
     volume: pl.Int64 = pa.Field(
         description="The volume of the stock",
-        nullable=False,
+        nullable=True, coerce=True,
         )
     dividends: pl.Float64 = pa.Field(
         description="The dividends of the stock",
-        nullable=True,
+        nullable=True, coerce=True,
         )
-    split: pl.Int32 = pa.Field(
+    splits: pl.Int64 = pa.Field(
         description="The split of the stock",
-        nullable=True,
+        nullable=True, coerce=True,
         )

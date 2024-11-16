@@ -53,8 +53,7 @@ def _update_stock_prices(
     )
 
     # Validate and trim price data
-    cols = SecurityPrices.__annotations__.keys()
-    latest_price_data = latest_price_data.select(cols)
+    latest_price_data = latest_price_data.select(SecurityPrices.__annotations__.keys())
     latest_price_data: pl.DataFrame = SecurityPrices.validate(latest_price_data) # type: ignore
 
     # Append new price data to db
