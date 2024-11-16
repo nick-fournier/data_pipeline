@@ -37,6 +37,10 @@ from __future__ import annotations
 import polars as pl
 from dagster import asset
 
+from ..resources.dbconn import PostgresConfig
+from ..resources.dbtools import _append_data, _read_table
+from ..resources.models import Scores
+
 NEG_SCORE_COLS = ("delta_long_lev_ratio", "delta_shares")
 POS_SCORE_COLS = (
             "roa",
@@ -131,25 +135,34 @@ def z_score_df(df: pl.DataFrame) -> pl.DataFrame:
     ])
 
 
-@asset
-def piotroski_scores(updated_fundamentals: pl.DataFrame) -> pl.DataFrame:
-    """Calculate the Piotroski F-Score for a given stock symbol.
+def _update_scores(uri: str, updated_fundamentals: pl.DataFrame) -> pl.DataFrame:
+    """Update scores (within SSH Tunnel)
+
+    This is the working function that gets run within the SSH tunnel. This
+    avoids having to reconnect repeatedly within this step.
 
     Args:
-    ----
-        updated_fundamentals (pl.DataFrame): The updated fundamentals data for the stock symbols
+        updated_fundamentals (pl.DataFrame): The updated fundamentals table.
 
     Returns:
-    -------
-        pl.DataFrame: The Piotroski F-Score for the stock symbols
-
+        pl.DataFrame: The updated scores table.
     """
-    # Select symbol with missing scores
-    missing_measures = updated_fundamentals.filter(
-        pl.col("pf_score").is_null() | pl.col("pf_score_weighted").is_null(),
-    )
+    # Get (possibly) outdated fundamentals (last updated more than 90 days ago)
+    cols = ''
+    # Commenting out, only fetch missing records not NULLs
+    # if len(Fundamentals.__annotations__.keys()) > 0:
+    #     cols = ['%s IS NULL' % k for k in Fundamentals.__annotations__.keys()]
+    #     cols = 'OR %s' % ' OR '.join(cols)
 
-    measures = calc_pf_measures(missing_measures)
+    query = """
+        SELECT * FROM fundamentals
+        WHERE id NOT IN (SELECT fundamentals_id FROM scores)
+        %s
+    """ % cols
+
+    outdated_fundamentals = pl.read_database_uri(query, uri)
+
+    measures = calc_pf_measures(outdated_fundamentals)
 
     scoring = {
         **{k: (pl.col(k) > 0).cast(pl.Int8).fill_null(0) for k in POS_SCORE_COLS},
@@ -165,13 +178,54 @@ def piotroski_scores(updated_fundamentals: pl.DataFrame) -> pl.DataFrame:
 
     score_matrix = measures.with_columns(**scoring).select(POS_SCORE_COLS + NEG_SCORE_COLS)
 
-    scores = measures.with_columns(
-        pf_score = score_matrix.sum(axis=1),
-        pf_score_weighted = (score_matrix * measures_matrix + 1).sum(axis=1),
+    updated_scores = (
+        measures
+        .with_columns(
+            pf_score = score_matrix.sum_horizontal(),
+            pf_score_weighted = (score_matrix * measures_matrix + 1).sum_horizontal(),
+        )
+        .rename({"id": "fundamentals_id"})
+        .select(Scores.__annotations__.keys())
     )
 
-    return scores.select([
-        "symbol", "as_of_date", "period_type", "pf_score", "pf_score_weighted",
-        *list(scoring.keys()),
-        ])
+    # Validate
+    updated_scores: pl.DataFrame = Scores.validate(updated_scores) # type: ignore
+
+    # Update scores table
+    _append_data(
+        uri=uri,
+        table_name="scores",
+        new_data=updated_scores,
+        pk=["fundamentals_id"],
+    )
+
+    # Get entire scores table
+    scores = _read_table(uri, "scores")
+
+    return scores
+
+
+@asset
+def piotroski_scores(updated_fundamentals: pl.DataFrame) -> pl.DataFrame:
+    """Calculate the Piotroski F-Score for a given stock symbol.
+
+    Args:
+    ----
+        updated_fundamentals (pl.DataFrame): The updated fundamentals data for the stock symbols
+
+    Returns:
+    -------
+        pl.DataFrame: The Piotroski F-Score for the stock symbols
+
+    """
+
+    # Initialize SSH tunnel to Postgres database
+    pg_config = PostgresConfig()
+
+    scores = pg_config.tunneled(
+        _update_scores,
+        updated_fundamentals=updated_fundamentals,
+    )
+
+    return scores
 

@@ -12,23 +12,37 @@ def _query_table(uri: str, query: str) -> pl.DataFrame:
 
 
 def _read_table(uri: str, table_name: str) -> pl.DataFrame:
-    query = f"SELECT * FROM {table_name}"  # noqa: S608
+    query = f"SELECT * FROM {table_name}"
     return pl.read_database_uri(query, uri)
 
 
-def _append_new_data(
+def _append_data(
     uri: str,
     table_name: str,
     new_data: pl.DataFrame,
     pk: str | list[str] | None = None,
     ) -> None:
+    """Append new rows to table
+
+    This function will append new rows to the database table. If any rows
+    exist in the proposed rows, they are dropped before being appended.
+
+    Args:
+        uri (str): Database URI
+        table_name (str): Table name
+        new_data (pl.DataFrame): New data to append
+        pk (str | list[str] | None, optional): Primary key(s) to check for duplicates.
+            Defaults to None.
+        replace (bool, optional): Replace existing rows. Defaults to False.
+    """
     if new_data.is_empty():
         return
 
     if pk:
         pk = pk if isinstance(pk, list) else [pk]
+
         existing_keys = pl.read_database_uri(
-            f"SELECT {', '.join(pk)} FROM {table_name}",  # noqa: S608
+            f"SELECT {', '.join(pk)} FROM {table_name}",
             uri,
         ).with_columns(
             status=pl.lit("existing"),

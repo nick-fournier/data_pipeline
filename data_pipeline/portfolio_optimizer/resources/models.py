@@ -7,6 +7,7 @@ import pydantic as pdt
 from dagster import Config
 
 
+# TODO: Convert this to pandera for consistency
 class SecurityList(Config):
     """Configuration for the security list.
 
@@ -114,9 +115,13 @@ class Fundamentals(pa.DataFrameModel):
         default=None, coerce=True, nullable=True,
         )
 
-# class Scores:
-#     """Score measures for the financial metrics."""
+class Scores(pa.DataFrameModel):
+    """Score measures for the financial metrics."""
 
+    fundamentals_id: pl.Int64 = pa.Field(
+        description="The fundamentals ID",
+        nullable=False, coerce=True, unique=True,
+        )
     roa: pl.Float64 = pa.Field(
         description="Return on assets",
         default=None, nullable=True, coerce=True,
@@ -161,10 +166,19 @@ class Fundamentals(pa.DataFrameModel):
         description="Earnings per share",
         default=None, nullable=True, coerce=True,
         )
-    book_value: pl.Float64 = pa.Field(
+    book_value: pl.Int64 = pa.Field(
         description="Book value",
         default=None, nullable=True, coerce=True,
         )
+    pf_score: pl.Int32 = pa.Field(
+        description="Piotroski F-Score",
+        default=None, nullable=True, coerce=True,
+        )
+    pf_score_weighted: pl.Float64 = pa.Field(
+        description="Weighted Piotroski F-Score",
+        default=None, nullable=True, coerce=True,
+        )
+
 
 class StockListings:
     pass

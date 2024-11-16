@@ -5,17 +5,17 @@ from __future__ import annotations
 import logging
 from typing import Callable
 
-import polars as pl  # noqa: TCH002
+import polars as pl
 from tqdm import tqdm
 
 from ..resources.configs import Params
-from ..resources.dbconn import PostgresConfig  # noqa: TCH001
-from ..resources.dbtools import _append_new_data
+from ..resources.dbconn import PostgresConfig
+from ..resources.dbtools import _append_data
 
 logger = logging.getLogger(__name__)
 
-def download_stock_data(
-    pg_config: PostgresConfig,
+def iter_download(
+    uri: str,
     new_stocks: pl.DataFrame,
     fetch_fn: Callable,
     output_table: str,
@@ -28,7 +28,7 @@ def download_stock_data(
 
     Args:
     ----
-        pg_config (PostgresConfig): The Postgres configuration
+        uri (str): The URI to the Postgres database
         new_stocks (pl.DataFrame): The list of new stock symbols
         existing_stocks (pl.DataFrame): The existing stock symbols
         fetch_fn (Callable(yq_request, new_stocks)): The fetch function to download the data
@@ -54,8 +54,8 @@ def download_stock_data(
             if downloaded_df.is_empty():
                 continue
 
-            pg_config.tunneled(
-                _append_new_data,
+            _append_data(
+                uri=uri,
                 table_name=output_table,
                 new_data=downloaded_df,
                 pk=pk,

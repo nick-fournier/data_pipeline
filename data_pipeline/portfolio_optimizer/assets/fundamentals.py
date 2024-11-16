@@ -13,25 +13,10 @@ from ..resources.dbconn import PostgresConfig
 from ..resources.dbtools import _read_table
 from ..resources.models import Fundamentals
 from ..utils import camel_case
-from .downloader import download_stock_data
-from .scores import PFScoreMeasures
+from .downloader import iter_download
 
 logger = logging.getLogger(__name__)
 
-
-VAL_MEASURE_FIELDS = [
-    "enterprise_value",
-    "enterprises_value_ebitda_ratio",
-    "enterprises_value_revenue_ratio",
-    "forward_pe_ratio",
-    "market_cap",
-    "pb_ratio",
-    "pe_ratio",
-    "peg_ratio",
-    "ps_ratio",
-]
-
-SCORE_FIELDS = list(PFScoreMeasures.__annotations__.keys())
 
 def _retrieve_outdated_fundamentals(
     uri: str,
@@ -71,6 +56,7 @@ def _retrieve_outdated_fundamentals(
     return pl.read_database_uri(query, uri)
 
 
+# TODO: Utilize above query to avoid passing symbols
 def _retrieve_missing_fundamentals(
     uri: str,
     symbols: pl.Series,
@@ -108,40 +94,97 @@ def fetch_fundamentals(new_stocks: pl.DataFrame) -> pl.DataFrame:
         validate=True,
     )
 
-    fndmtl_fields = {}
-    valmes_fields = {}
-    for k in Fundamentals.__annotations__:
-        if k in VAL_MEASURE_FIELDS:
-            valmes_fields[camel_case(k)] = k
-        elif k not in SCORE_FIELDS and k not in VAL_MEASURE_FIELDS:
-            fndmtl_fields[camel_case(k)] = k
+    # Combine field dicts
+    fundamental_fields = {camel_case(k): k for k in Fundamentals.__annotations__}
 
-    _valuation_measures_df = pl.DataFrame(
-        yq_request.valuation_measures.reset_index(),
-    )
-
-    response = yq_request.get_financial_data(
-            types=list(fndmtl_fields.keys()),
+    # Fetch financial data and valuation measures
+    fin_response = yq_request.get_financial_data(
+            types=list(fundamental_fields.keys()),
             frequency="q",
             trailing=True,
         )
+    val_response = yq_request.valuation_measures
 
-    if not isinstance(response, pd.DataFrame):
-        msg = f"Failed to fetch financial data from Yahoo Finance, skipping: {response}"
-        logger.error(msg)
+    # Check if response is a DataFrame
+    if not isinstance(val_response, pd.DataFrame) or isinstance(fin_response, str):
+        msg = f"""
+        Failed to fetch financial data from Yahoo Finance, skipping:
+        Financials: {fin_response}
+        Valuation Measures: {val_response}
+        """
+        logger.warning(msg)
         return pl.DataFrame()
 
-    _financials_df = pl.DataFrame(response.reset_index())
+    # Convert the response to a Polars DataFrame
+    _financials_df = pl.DataFrame(fin_response.reset_index())
+    _valuation_measures_df = pl.DataFrame(val_response.reset_index())
 
     # Join the two DataFrames and rename columns
     _fundamentals_df = _financials_df.join(
         _valuation_measures_df,
         on=["symbol", "asOfDate", "periodType"],
         how="left",
-    ).rename({**fndmtl_fields, **valmes_fields}).lazy()
+    ).rename(fundamental_fields, strict = False).lazy()
+
+    # Find missing fields in the dataframe
+    missing_fields = set(fundamental_fields.values()) - set(_fundamentals_df.columns)
+    missing_fields = {x: pl.lit(None) for x in missing_fields}
+
+    # Fill missing expected field values with NA
+    _fundamentals_df = (
+        _fundamentals_df
+        .with_columns(**missing_fields)
+        .select(list(fundamental_fields.values()))
+    )
 
     # Validate the DataFrame
     return Fundamentals.validate(_fundamentals_df).collect() # type: ignore
+
+
+def _update_fundamentals(
+    uri: str,
+    updated_security_profiles: pl.DataFrame,
+    ) -> pl.DataFrame:
+    """Update fundamentals database.
+
+    This function updates the fundamentals database with the latest financial metrics.
+
+    Args:
+    ----
+        updated_security_profiles (pl.DataFrame): The updated security profiles
+
+    Returns:
+    -------
+        pl.DataFrame: The updated fundamentals
+
+    """
+    # Need to check symbol: date key pairs for any missing combinations.
+
+    # Get (possibly) outdated fundamentals (last updated more than 90 days ago)
+    outdated_symbols = _retrieve_outdated_fundamentals(uri)
+
+    # Get symbols missing from fundamentals table (i.e. no data available)
+    missing_symbols = _retrieve_missing_fundamentals(uri, updated_security_profiles["symbol"])
+
+    # Get list of symbols that are either outdated or missing
+    to_be_updated = updated_security_profiles.filter(
+        pl.col("symbol").is_in(outdated_symbols["symbol"]) |
+        pl.col("symbol").is_in(missing_symbols["symbol"]),
+    )
+
+    if not to_be_updated.is_empty():
+
+        iter_download(
+            uri = uri,
+            new_stocks = to_be_updated,
+            fetch_fn = fetch_fundamentals,
+            output_table = "fundamentals",
+            pk = ["symbol", "as_of_date", "period_type", "currency_code"],
+        )
+
+    # Get latest securities list
+    fundamentals = _read_table(uri, table_name="fundamentals")
+    return fundamentals
 
 
 @asset(
@@ -163,39 +206,14 @@ def updated_fundamentals(
         pl.DataFrame: The updated fundamentals
 
     """
-    # Need to check symbol: date key pairs for any missing combinations.
 
     # Initialize SSH tunnel to Postgres database
     pg_config = PostgresConfig()
 
-    # Get (possibly) outdated fundamentals (last updated more than 90 days ago)
-    outdated_symbols = pg_config.tunneled(
-        fn=_retrieve_outdated_fundamentals,
+    # Update fundamentals, tunnel through SSH to access database
+    fundamentals = pg_config.tunneled(
+        _update_fundamentals,
+        updated_security_profiles=updated_security_profiles,
     )
 
-    # Get symbols missing from fundamentals table (i.e. no data available)
-    missing_symbols = pg_config.tunneled(
-        fn=_retrieve_missing_fundamentals,
-        symbols=updated_security_profiles["symbol"],
-    )
-
-    # Get list of symbols that are either outdated or missing
-    to_be_updated = updated_security_profiles.filter(
-        pl.col("symbol").is_in(outdated_symbols["symbol"])
-        | pl.col("symbol").is_in(missing_symbols["symbol"]),
-    )
-
-    if not to_be_updated.is_empty():
-        download_stock_data(
-            pg_config = pg_config,
-            new_stocks = to_be_updated,
-            fetch_fn = fetch_fundamentals,
-            output_table = "fundamentals",
-            pk = ["symbol", "as_of_date", "period_type", "currency_code"],
-        )
-
-    # Get latest securities list
-    return pg_config.tunneled(
-        _read_table,
-        table_name="fundamentals",
-        )
+    return fundamentals

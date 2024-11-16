@@ -42,7 +42,7 @@ def stock_listings() -> pl.DataFrame:
         # Filter out stocks with non letters in the symbol
         pl.col("symbol").str.contains(r"^[A-Z]"),
         # Filter out stocks with >= 5 letters in the symbol
-        pl.col("symbol").str.lengths() < params.MAX_SYMBOL_LENGTH,
+        pl.col("symbol").str.len_chars() < params.MAX_SYMBOL_LENGTH,
     ]
 
     return stock_list.filter(pl.all_horizontal(_filter))
