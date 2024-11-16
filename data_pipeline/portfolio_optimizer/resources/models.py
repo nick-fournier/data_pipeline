@@ -180,5 +180,50 @@ class Scores(pa.DataFrameModel):
         )
 
 
-class StockListings:
-    pass
+class SecurityPrices(pa.DataFrameModel):
+    """Configuration for the security prices.
+
+    This configuration is used to specify the stock prices to fetch from the Yahoo Finance API.
+
+    """
+
+    symbol: pl.String = pa.Field(
+        description="The stock symbol",
+        nullable=False,
+        )
+    date: pl.Date = pa.Field(
+        description="The date of the stock price",
+        nullable=False,
+        )
+    open: pl.Float64 = pa.Field(
+        description="The opening price of the stock",
+        nullable=False,
+        )
+    high: pl.Float64 = pa.Field(
+        description="The highest price of the stock",
+        nullable=False,
+        )
+    low: pl.Float64 = pa.Field(
+        description="The lowest price of the stock",
+        nullable=False,
+        )
+    close: pl.Float64 = pa.Field(
+        description="The closing price of the stock",
+        nullable=False,
+        )
+    adjclose: pl.Float64 = pa.Field(
+        description="The adjusted closing price of the stock",
+        nullable=False,
+        )
+    volume: pl.Int64 = pa.Field(
+        description="The volume of the stock",
+        nullable=False,
+        )
+    dividends: pl.Float64 = pa.Field(
+        description="The dividends of the stock",
+        nullable=True,
+        )
+    split: pl.Int32 = pa.Field(
+        description="The split of the stock",
+        nullable=True,
+        )
