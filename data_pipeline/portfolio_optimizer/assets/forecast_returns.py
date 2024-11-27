@@ -13,141 +13,124 @@ import pandas as pd
 import polars as pl
 from dagster import asset
 from scipy import stats
+from statsmodels.api import WLS
 from sklearn.linear_model import LinearRegression
 from sklearn.neural_network import MLPRegressor
+from sklearn.model_selection import GridSearchCV
 
-from ..resources.configs import Params
 from ..resources.dbconn import PostgresConfig
-from ..resources.models import Scores, SecurityPrices
 
+# Model parameters
+X_COLS = [
+    'roa',
+    'cash_ratio',
+    'delta_cash',
+    'delta_roa',
+    'accruals',
+    'delta_long_lev_ratio',
+    'delta_current_lev_ratio',
+    'delta_shares',
+    'delta_gross_margin',
+    'delta_asset_turnover'
+    ]
 
-def pct_change_from_first(x):
-    return (x - x.iloc[0])/x.iloc[0]
+def prepare_data(
+    fundamentals: pl.DataFrame,
+    piotroski_scores: pl.DataFrame,
+    stock_prices: pl.DataFrame,
+    ) -> pl.DataFrame:
+    """Prepare the data for forecasting expected returns.
 
-def rescore(z, mean, sd):
-    return z * sd + mean
+    Args:
+        fundamentals (pl.DataFrame): The financial fundamentals for each security
+        piotroski_scores (pl.DataFrame): The Piotroski F-Score for each security
+        stock_prices (pl.DataFrame): The monthly stock prices for each security
 
-def zscore(x):
-    return (x - x.mean()) / x.std()
+    Returns:
+        pl.DataFrame: The prepared data for forecasting expected returns
+    """
 
-def minmax(v):
-    return (v - v.min()) / (v.max() - v.min())
+    # Join scores onto fundamentals
+    fin_data = (
+        piotroski_scores
+        .join(
+            fundamentals,
+            left_on='fundamentals_id',
+            right_on='id',
+        )
+        .with_columns(
+            year=pl.col('as_of_date').dt.year(),
+            quarter=pl.col('as_of_date').dt.quarter(),
+        )
+    )
 
-def get_analysis_data():
-    score_cols = ['security_id', 'date', 'security__symbol', 'fiscal_year',
-                  'pf_score', 'pf_score_weighted', 'eps', 'pe_ratio', 'roa', 'cash', 'cash_ratio',
-                  'delta_cash', 'delta_roa', 'accruals', 'delta_long_lev_ratio',
-                  'delta_current_lev_ratio', 'delta_shares', 'delta_gross_margin', 'delta_asset_turnover']
+    # Calculate quarterly returns in price data
+    price_dat = (
+        stock_prices
+        .with_columns(
+            quarter=pl.col('date').dt.quarter(),
+        )
+        .group_by(['symbol', 'quarter']).agg(
+            pl.col('close').first().alias('first_close'),
+            pl.col('close').last().alias('last_close'),
+            pl.col('close').mean().alias('mean'),
+            pl.col('close').var().alias('var'),
+            (
+                pl.col('close').last() / pl.col('close').first() - 1
+            ).alias('quarterly_yield'),
+            # Normalized mean-variance ratio. Higher means more stable
+            (
+                pl.col('close').mean() / pl.col('close').var()
+            ).alias('inv_mean_var_ratio')
+        )
+    )
+    # Join stock data onto financial data
+    model_data = fin_data.join(
+        price_dat,
+        left_on=['symbol', 'quarter'],
+        right_on=['symbol', 'quarter'],
+    )
 
-    # financials = models.Fundamentals.objects.all().values('security_id', 'date')
-    prices_qry = SecurityPrice.objects.all().values('security_id', 'date', 'close')
-    scores_qry = Scores.objects.all().values(*score_cols)
+    # Sort data
+    model_data = model_data.sort('symbol', 'as_of_date')
 
-    # As dataframe
-    # financials = pd.DataFrame(financials)
-    prices = pd.DataFrame(prices_qry)
-    df = pd.DataFrame(scores_qry).rename(columns={'security__fundamentals__fiscal_year': 'year'})
+    # Lag of quarterly yield for next quarter
+    model_data = model_data.with_columns(
+        pl.col('quarterly_yield').shift(-1).alias('next_quarterly_yield')
+    )
 
-    pd.DataFrame(Scores.objects.all().values('security_id', 'date', 'security__fundamentals__fiscal_year'))
+    # Drop/fill NA and normalize
+    model_data = model_data.drop_nulls()
 
-    # update scores
-    # pfobject = GetFscore()
-    # pfobject.save_scores()
-
-    # Aggregate price data annually
-    prices.close = prices.close.astype(float)
-    prices.date = pd.to_datetime(prices.date)
-
-    col_names = {'date': 'year', 'last': 'yearly_close', 'var': 'variance'}
-    prices_year = prices.groupby([prices.date.dt.year, 'security_id']).close\
-        .agg(['last', 'mean', 'var']).reset_index()\
-        .rename(columns=col_names)
-
-    # Add year and merge prices
-    df.date = pd.to_datetime(df.date)
-    df.rename(columns={'fiscal_year': 'year'}, inplace=True)
-    df = df.merge(prices_year, on=['security_id', 'year'])
-
-    # df.yearly_close = df.yearly_close.astype(float)
-    df.pe_ratio = df.pe_ratio.astype(float)
-    df = df.sort_values(['security_id', 'date'])
-
-    return df
+    return model_data
 
 
 def _forecast_returns(
     fundamentals: pl.DataFrame,
     piotroski_scores: pl.DataFrame,
     stock_prices: pl.DataFrame,
-    method='nn',
+    # method='nn',
     backcast=False
     ) -> pl.DataFrame:
 
-    # Join scores onto fundamentals
-    finscores = piotroski_scores.join(
-        fundamentals,
-        left_on='fundamentals_id',
-        right_on='id',
-    )
+    # Get the prepared data
+    model_data = prepare_data(fundamentals, piotroski_scores, stock_prices)
 
-    x_cols = [
-        'roa', 'cash_ratio', 'delta_cash', 'delta_roa', 'accruals', 'delta_long_lev_ratio',
-        'delta_current_lev_ratio', 'delta_shares', 'delta_gross_margin', 'delta_asset_turnover'
-        ]
+    # Get independent variables
+    x = model_data.select(X_COLS).to_pandas()
+    y = model_data['next_quarterly_yield'].to_pandas()
+    w = model_data['inv_mean_var_ratio'].to_pandas()
 
-    model_df = finscores.set_index(['security_id', 'year'])[x_cols + ['yearly_close']].copy().astype(float)
+    # Estimate model
+    fit = WLS(y, x, weights=w).fit()
+    fit.summary()
 
-    # Get lagged value of features from t-1
-    model_df['lag_close'] = model_df.groupby('security_id', group_keys=False)['yearly_close'].shift(-1)
+    # Scatter plot of actual vs predicted
+    # from plotly import express as px
+    # compare = pl.DataFrame({'actual': y, 'predicted': fit.predict(x)})
+    # fig = px.scatter(compare, x='actual', y='predicted')
+    # fig.show()
 
-    # Normalize close price within group since that's company-level feature, all else are high level
-    df_grps = model_df[~model_df.lag_close.isnull()].groupby('security_id', group_keys=False)
-    model_df.loc[~model_df.lag_close.isnull(), 'norm_lag_close'] = df_grps['lag_close'].apply(stats.zscore)
-
-    # Drop/fill NA and normalize
-    model_df = model_df.dropna(subset=x_cols)
-    model_df.loc[:, x_cols] = model_df[x_cols].apply(stats.zscore)
-
-    # Store mean and std dev for later
-    grp_stats = df_grps['lag_close'].agg(mean=np.mean, std=np.std)
-
-    # temporary fy column to groupby on easily...
-    model_df['fy'] = model_df.index.get_level_values('year')
-
-    # Initalize DF to join to
-    i = model_df.fy.min() + 1
-
-    if not backcast:
-        i = model_df.fy.max()
-
-    while i <= model_df.fy.max():
-        # Model matrix for time<i
-        df_t = model_df[model_df.fy < i]
-        # Drop any missing years
-        df_t = df_t[~df_t.norm_lag_close.isna()]
-        # Prediction matrix for time i
-        df_t0 = model_df[model_df.fy == i]
-
-        # Assemble matrices
-        y = df_t['norm_lag_close']#.to_numpy()
-        x = df_t[x_cols].astype(float)#.to_numpy()
-
-        # Estimate model
-        if method == 'nn':
-            model = MLPRegressor(max_iter=1000).fit(x, y)
-        else:
-            model = LinearRegression().fit(x, y)
-            print(pd.Series(list(model.coef_), index=x_cols))
-        print(f'R^2 = {model.score(x, y)}')
-
-
-        # Make predictions
-        yhat = pd.DataFrame(model.predict(df_t0[x_cols]), index=df_t0.index, columns=['yhat']).join(grp_stats)
-        yhat['next_close'] = yhat.apply(lambda row: rescore(row['yhat'], row['mean'], row['std']), axis=1)
-
-        # Calculate returns
-        model_df.loc[yhat.index, yhat.columns] = yhat
-        i += 1
 
     # Expected returns as percent change
     expected_returns = model_df.apply(lambda x: (x.next_close - x.yearly_close)/x.yearly_close, axis=1)
@@ -180,11 +163,13 @@ def forecasted_returns(
     # Initialize SSH tunnel to Postgres database
     pg_config = PostgresConfig()
 
-    scores = pg_config.tunneled(
-        _forecast_returns,
+    _forecast_returns(
         fundamentals=fundamentals,
         piotroski_scores=piotroski_scores,
         stock_prices=stock_prices,
     )
+
+    # scores = pg_config.tunneled(
+    # )
 
     return pl.DataFrame()
