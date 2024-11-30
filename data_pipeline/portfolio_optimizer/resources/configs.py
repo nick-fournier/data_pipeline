@@ -16,7 +16,7 @@ class Params(Config):
     MIN_VOLUME: int = 0
     MAX_FAILURES: int = 5
     CHUNK_SIZE: int = 500
-    PRICE_PERIOD: str = '5y'
+    PRICE_PERIOD: str = '10y'
     PRICE_INTERVAL: str = '1mo'
     FSCORE_CUTOFF: int = 7
 
