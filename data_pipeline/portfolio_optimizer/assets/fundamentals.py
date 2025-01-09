@@ -9,8 +9,6 @@ import polars as pl
 import yahooquery as yq
 from dagster import asset
 
-from ..resources.dbconn import PostgresConfig
-from ..resources.dbtools import _read_table
 from ..resources.models import Fundamentals
 from ..utils import camel_case
 from .downloader import iter_download
@@ -141,33 +139,39 @@ def fetch_fundamentals(new_stocks: pl.DataFrame) -> pl.DataFrame:
     return Fundamentals.validate(_fundamentals_df).collect() # type: ignore
 
 
-def _update_fundamentals(
-    uri: str,
-    updated_security_profiles: pl.DataFrame,
-    ) -> pl.DataFrame:
+@asset(
+    description="Update company fundamentals from Yahoo Finance",
+    io_manager_key="pgio_manager",
+)
+def fundamentals(context, security_list: pl.DataFrame) -> None:
     """Update fundamentals database.
 
     This function updates the fundamentals database with the latest financial metrics.
 
     Args:
     ----
-        updated_security_profiles (pl.DataFrame): The updated security profiles
+        context (Context): The Dagster context
+        security_list (pl.DataFrame): The updated security profiles
 
     Returns:
     -------
         pl.DataFrame: The updated fundamentals
 
     """
+
+    # Get database URI
+    uri = context.resources.pgio_manager.postgres_config.db_uri()
+
     # Need to check symbol: date key pairs for any missing combinations.
 
     # Get (possibly) outdated fundamentals (last updated more than 90 days ago)
     outdated_symbols = _retrieve_outdated_fundamentals(uri)
 
     # Get symbols missing from fundamentals table (i.e. no data available)
-    missing_symbols = _retrieve_missing_fundamentals(uri, updated_security_profiles["symbol"])
+    missing_symbols = _retrieve_missing_fundamentals(uri, security_list["symbol"])
 
     # Get list of symbols that are either outdated or missing
-    to_be_updated = updated_security_profiles.filter(
+    to_be_updated = security_list.filter(
         pl.col("symbol").is_in(outdated_symbols["symbol"]) |
         pl.col("symbol").is_in(missing_symbols["symbol"]),
     )
@@ -181,39 +185,3 @@ def _update_fundamentals(
             output_table = "fundamentals",
             pk = ["symbol", "as_of_date", "period_type", "currency_code"],
         )
-
-    # Get latest securities list
-    fundamentals = _read_table(uri, table_name="fundamentals")
-    return fundamentals
-
-
-@asset(
-    description="Update company fundamentals from Yahoo Finance",
-)
-def fundamentals(
-    security_profiles: pl.DataFrame,
-) -> pl.DataFrame:
-    """Update fundamentals database.
-
-    This function updates the fundamentals database with the latest financial metrics.
-
-    Args:
-    ----
-        updated_security_profiles (pl.DataFrame): The updated security profiles
-
-    Returns:
-    -------
-        pl.DataFrame: The updated fundamentals
-
-    """
-
-    # Initialize SSH tunnel to Postgres database
-    pg_config = PostgresConfig()
-
-    # Update fundamentals, tunnel through SSH to access database
-    fundamentals = pg_config.tunneled(
-        _update_fundamentals,
-        updated_security_profiles=security_profiles,
-    )
-
-    return fundamentals

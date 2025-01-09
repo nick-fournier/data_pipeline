@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import polars as pl
 import yahooquery as yq
-from dagster import asset
+from dagster import asset, op
 
 from ..resources.dbconn import PostgresConfig
 from ..resources.dbtools import (
@@ -58,20 +58,20 @@ def fetch_profiles(
 
     return pl.DataFrame(profiles_ls)
 
-
-def _update_security_profiles(
-    uri: str,
-    stock_listings: pl.DataFrame,
-    ) -> pl.DataFrame:
+@asset(
+    description="Update security profiles from Yahoo Finance",
+    io_manager_key="pgio_manager",
+)
+def security_list(context, stock_tickers: pl.DataFrame) -> None:
     """Update security list database.
 
-        This function updates and returns the latest securities list
+    This function updates and returns the latest securities list
     from the Postgres database.
 
     Args:
     ----
         uri (str): The URI to the Postgres database
-        stock_listings (pl.DataFrame): The latest stock symbols from the NASDAQ screener.
+        stock_tickers (pl.DataFrame): The latest stock symbols from the NASDAQ screener.
 
     Returns:
     -------
@@ -79,16 +79,18 @@ def _update_security_profiles(
 
     """
 
-    # New stocks to add
-    existing_securities_df = _read_table(uri, table_name="security_list")
+    uri = context.resources.pgio_manager.postgres_config.db_uri()
 
-    new_stocks = stock_listings.filter(
+    # New stocks to add
+    existing_securities_df = pl.read_database_uri("SELECT * FROM security_list", uri=uri)
+
+    new_stocks = stock_tickers.filter(
         ~pl.col("symbol").is_in(existing_securities_df["symbol"]),
     )
 
     # Stocks to remove
     removed_stocks = existing_securities_df.filter(
-        ~pl.col("symbol").is_in(stock_listings["symbol"]),
+        ~pl.col("symbol").is_in(stock_tickers["symbol"]),
     )["symbol"]
 
     if not removed_stocks.is_empty():
@@ -109,39 +111,3 @@ def _update_security_profiles(
             fetch_fn = fetch_profiles,
             output_table = "security_list",
         )
-
-    # Get latest securities list
-    security_list = _read_table(uri, table_name="security_list")
-    return security_list
-
-
-@asset(
-    description="Update security profiles from Yahoo Finance",
-)
-def security_profiles(
-    security_list: pl.DataFrame,
-) -> pl.DataFrame:
-    """Update security list database.
-
-    This function updates and returns the latest securities list
-    from the Postgres database.
-
-    Args:
-    ----
-        stock_listings (pl.DataFrame): The latest stock symbols from the NASDAQ screener.
-
-    Returns:
-    -------
-        pl.DataFrame: The updated securities list
-
-    """
-    # Initialize SSH tunnel to Postgres database
-    pg_config = PostgresConfig()
-
-    # Update security profiles, tunnel through SSH to access database
-    updated_securities = pg_config.tunneled(
-        _update_security_profiles,
-        stock_listings=security_list,
-    )
-
-    return updated_securities

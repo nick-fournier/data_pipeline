@@ -3,15 +3,16 @@
 import polars as pl
 from dagster import asset
 
-from ..resources.configs import Params
+from data_pipeline.portfolio_optimizer.resources.configs import Params
 
 
 @asset(
-    description="""Fetches the latest stock symbols from the NASDAQ
-    screener of NYSE, AMEX, and NASDAQ stocks""",
-    # io_manager_key="pgio_manager",
+    description="""
+    Fetches the latest stock symbols from the NASDAQ
+    screener of NYSE, AMEX, and NASDAQ stocks
+    """,
     )
-def security_list() -> pl.DataFrame:
+def stock_tickers() -> pl.DataFrame:
     """Fetch latest stock screener from NASDAQ.
 
     Fetches the latest stock market screener list from

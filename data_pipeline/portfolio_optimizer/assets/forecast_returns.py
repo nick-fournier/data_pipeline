@@ -9,19 +9,14 @@
 """
 
 import numpy as np
-import pandas as pd
 import polars as pl
 from dagster import asset
-from scipy import stats
-from statsmodels.api import WLS
-from sklearn.linear_model import LinearRegression
-from sklearn.neural_network import MLPRegressor
-from sklearn.model_selection import GridSearchCV
-
-from ..resources.dbconn import PostgresConfig
-from ..resources.configs import Params
-
 from plotly import express as px
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
+from sklearn.neural_network import MLPRegressor
+from statsmodels.api import WLS
+
+from ..resources.configs import Params
 
 # Model parameters
 X_COLS = [
@@ -201,14 +196,14 @@ def calc_average_yield(stock_prices: pl.DataFrame) -> pl.DataFrame:
 
 def prepare_data(
     fundamentals: pl.DataFrame,
-    piotroski_scores: pl.DataFrame,
+    scores: pl.DataFrame,
     stock_prices: pl.DataFrame,
     ) -> pl.DataFrame:
     """Prepare the data for forecasting expected returns.
 
     Args:
         fundamentals (pl.DataFrame): The financial fundamentals for each security
-        piotroski_scores (pl.DataFrame): The Piotroski F-Score for each security
+        scores (pl.DataFrame): The Piotroski F-Score for each security
         stock_prices (pl.DataFrame): The monthly stock prices for each security
 
     Returns:
@@ -217,7 +212,7 @@ def prepare_data(
 
     # Join scores onto fundamentals
     fin_data = (
-        piotroski_scores
+        scores
         .join(
             fundamentals,
             left_on='fundamentals_id',
@@ -273,14 +268,30 @@ def prepare_data(
     return model_data
 
 
-def _forecast_returns(
+@asset(
+    description="Forecasted expected returns for each security",
+    io_manager_key="pgio_manager",
+)
+def forecasted_returns(
     fundamentals: pl.DataFrame,
-    piotroski_scores: pl.DataFrame,
-    stock_prices: pl.DataFrame,
+    scores: pl.DataFrame,
+    security_price: pl.DataFrame,
     ) -> pl.DataFrame:
+    """
+    Forecasted expected returns for each security based on
+    the Piotroski F-Score and financial fundamentals.
+
+    Args:
+        fundamentals (pl.DataFrame): The financial fundamentals for each security
+        scores (pl.DataFrame): The Piotroski F-Score for each security
+        security_prices (pl.DataFrame): The monthly stock prices for each security
+
+    Returns:
+        pl.DataFrame: The forecasted expected returns for each security
+    """
 
     # Get the prepared data
-    model_data = prepare_data(fundamentals, piotroski_scores, stock_prices)
+    model_data = prepare_data(fundamentals, scores, security_price)
 
     # Separate the future prediction rows from the training rows
     est_data = model_data.filter(pl.col('next_quarterly_yield').is_not_null())
@@ -290,94 +301,89 @@ def _forecast_returns(
     # model_data = model_data.drop_nulls()
 
     # Normalize financial data on z-score
-    est_data = est_data.with_columns(
+    x_train = est_data.with_columns(
         **{
             k: z_score(pl.col(k)) for k in X_COLS
         }
     )
 
-    # Get independent variables
-    x = est_data.select(X_COLS).to_pandas()
-    x['intercept'] = 1
-    y = est_data['next_quarterly_yield'].to_numpy()
-    w = est_data['r_squared'].to_numpy()
+    x_pred = pred_data.with_columns(
+        **{
+            k: z_score(pl.col(k)) for k in X_COLS
+        }
+    ).drop('next_quarterly_yield')
+
+
+    # Setup test and train data
+    x_train = x_train.select(X_COLS).to_pandas()
+    # x['intercept'] = 1
+    y_train = est_data['next_quarterly_yield'].to_numpy()
+    w_train = est_data['r_squared'].to_numpy()
+
+
+    # Setup test data
+    x_pred = pred_data.select(X_COLS).to_pandas()
+    w_pred = pred_data['r_squared'].to_numpy()
 
     # Estimate model
-    ols_fit = WLS(y, x, weights=w).fit() # type: ignore
-    ols_fit.summary()
+    # model = WLS(y, x, weights=w).fit() # type: ignore
+    model = MLPRegressor(
+        hidden_layer_sizes=(100, 50),
+        activation='tanh',
+        solver='sgd',
+        alpha=0.01,
+        learning_rate_init=0.01,
+        max_iter=500,
+        random_state=42,
+    )
+
+    # Fit the model
+    model.fit(x_train, y_train)
+
+    # Create predictions dataframe with fundamentals_id
+    predicted = pl.Series(model.predict(x_pred))
+    expected_returns = pred_data.with_columns(
+        expected_returns=predicted,
+    )
 
     if False:
-        # Neural network model
-        nnmodel = MLPRegressor(
-            hidden_layer_sizes=(30,30,30),
-            max_iter = 700,
-            activation = 'logistic',
-            solver = 'adam'
-        )
+        # Baseline model
+        ols_fit = WLS(y_train, x_train, weights=w_train).fit() # type: ignore
+        print(ols_fit.summary())
 
-        # Grid search
-        param_grid = {
-            'hidden_layer_sizes': [(5, 5, 5), (15, 15, 15), (30, 30, 30), (50, 50, 50)],
-            'max_iter': [500, 700, 1000],
-            'activation': ['relu', 'tanh', 'logistic'],
-            'solver': ['adam', 'sgd']
+        # Neural network model
+        mlp = MLPRegressor(random_state=42)
+
+        param_distributions = {
+            'hidden_layer_sizes': [
+                (50, 50), (100, 50), (100, 100), (100, 100, 100), (50, 50, 50), (100, 100, 100)
+                ],
+            'activation': ['relu', 'tanh'],
+            'solver': ['adam', 'sgd'],
+            'alpha': [0.0001, 0.001, 0.01],
+            'learning_rate_init': [0.001, 0.01, 0.1],
+            'max_iter': [200, 500],
         }
 
-        grid_search = GridSearchCV(nnmodel, param_grid, cv=5)
-        grid_search.fit(x, y)
+        random_search = RandomizedSearchCV(
+            estimator=mlp,
+            param_distributions=param_distributions,
+            n_iter=50,  # Limit number of combinations to test
+            cv=3,
+            scoring='neg_mean_squared_error',
+            n_jobs=-1,
+            random_state=42,
+        )
+        random_search.fit(x_pred, y_train)
+        random_search.best_params_
 
-        # Best parameters
-        grid_search.best_params_
-        nn_fit = nnmodel.fit(x, y)
+        nn_model = random_search.best_estimator_
 
-    # Scatter plot of actual vs predicted
-    if False:
-        compare_ols = pl.DataFrame({'actual': y, 'predicted': ols_fit.predict(x)})
+        # Scatter plot of actual vs predicted
+        compare_ols = pl.DataFrame({'actual': y_train, 'predicted': ols_fit.predict(x_train)})
         px.scatter(compare_ols, x='actual', y='predicted').show()
 
-        compare_nn = pl.DataFrame({'actual': y, 'predicted': nn_fit.predict(x)})
+        compare_nn = pl.DataFrame({'actual': y_train, 'predicted': nn_model.predict(x_train)})
         px.scatter(compare_nn, x='actual', y='predicted').show()
 
-
-    # Get expected returns
-    expected_returns = pred_data.with_columns(
-        expected_returns=ols_fit.predict(x)
-    )
-
     return expected_returns
-
-
-@asset(
-    description="Forecasted expected returns for each security",
-)
-def forecasted_returns(
-    stock_prices: pl.DataFrame,
-    piotroski_scores: pl.DataFrame,
-    fundamentals: pl.DataFrame,
-    ) -> pl.DataFrame:
-    """
-    Forecasted expected returns for each security based on
-    the Piotroski F-Score and financial fundamentals.
-
-    Args:
-        stock_prices (pl.DataFrame): The monthly stock prices for each security
-        piotroski_scores (pl.DataFrame): The Piotroski F-Score for each security
-        fundamentals (pl.DataFrame): The financial fundamentals for each security
-
-    Returns:
-        pl.DataFrame: _description_
-    """
-
-    # Initialize SSH tunnel to Postgres database
-    pg_config = PostgresConfig()
-
-    _forecast_returns(
-        fundamentals=fundamentals,
-        piotroski_scores=piotroski_scores,
-        stock_prices=stock_prices,
-    )
-
-    # scores = pg_config.tunneled(
-    # )
-
-    return pl.DataFrame()

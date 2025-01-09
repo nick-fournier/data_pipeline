@@ -135,18 +135,28 @@ def z_score_df(df: pl.DataFrame) -> pl.DataFrame:
     ])
 
 
-def _update_scores(uri: str) -> pl.DataFrame:
+@asset(
+    description="Calculate the Piotroski F-Score for a given stock symbol.",
+    io_manager_key="pgio_manager",
+    deps={"fundamentals": "fundamentals"},
+)
+def scores(context) -> None:
     """Update scores (within SSH Tunnel)
 
     This is the working function that gets run within the SSH tunnel. This
     avoids having to reconnect repeatedly within this step.
 
     Args:
-        fundamentals (pl.DataFrame): The updated fundamentals table.
+    ----
+        context (Context): The Dagster context
 
     Returns:
         pl.DataFrame: The updated scores table.
     """
+
+    # Get database URI
+    uri = context.resources.pgio_manager.postgres_config.db_uri()
+
     # Get (possibly) outdated fundamentals (last updated more than 90 days ago)
     cols = ''
     # Commenting out, only fetch missing records not NULLs
@@ -198,33 +208,4 @@ def _update_scores(uri: str) -> pl.DataFrame:
         new_data=updated_scores,
         pk=["fundamentals_id"],
     )
-
-    # Get entire scores table
-    scores = _read_table(uri, "scores")
-
-    return scores
-
-
-@asset
-def piotroski_scores(fundamentals: pl.DataFrame) -> pl.DataFrame:
-    """Calculate the Piotroski F-Score for a given stock symbol.
-
-    Args:
-    ----
-        fundamentals (pl.DataFrame): The updated fundamentals data for the stock symbols
-
-    Returns:
-    -------
-        pl.DataFrame: The Piotroski F-Score for the stock symbols
-
-    """
-
-    # Initialize SSH tunnel to Postgres database
-    pg_config = PostgresConfig()
-
-    scores = pg_config.tunneled(
-        _update_scores,
-    )
-
-    return scores
 

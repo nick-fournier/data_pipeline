@@ -6,32 +6,39 @@ import yahooquery as yq
 from dagster import asset
 
 from ..resources.configs import Params
-from ..resources.dbconn import PostgresConfig
-from ..resources.dbtools import _append_data, _read_table
+from ..resources.dbtools import _append_data
 from ..resources.models import SecurityPrices
 
 
-def _update_stock_prices(
-    uri: str,
-    piotroski_scores: pl.DataFrame,
+@asset(
+    description="Download stock prices for stocks passing the criteria",
+    io_manager_key="pgio_manager",
+)
+def security_price(
+    context,
+    scores: pl.DataFrame,
     fundamentals: pl.DataFrame
-    ) -> pl.DataFrame:
+    ) -> None:
     """Download stock prices for stocks passing the criteria.
 
     Args:
-        uri (str): The database URI
-        piotroski_scores (pl.DataFrame): The Piotroski F-Score data
+    ----
+        context (Context): The Dagster context
+        scores (pl.DataFrame): The Piotroski F-Score data
         fundamentals (pl.DataFrame): The updated fundamentals
 
     Returns:
         pl.DataFrame: The stock prices
     """
 
+    # Get database URI
+    uri = context.resources.pgio_manager.postgres_config.db_uri()
+
     # Get the configuration parameters
     params = Params()
 
     # Join symbol from fundamentals to piotroski_scores
-    piotroski_scores = piotroski_scores.join(
+    piotroski_scores = scores.join(
         fundamentals.select(['id', 'symbol']),
         left_on='fundamentals_id',
         right_on='id',
@@ -63,41 +70,3 @@ def _update_stock_prices(
         new_data=latest_price_data,
         pk=['symbol', 'date']
     )
-
-    # Get updated price data
-    price_data = _read_table(
-        uri=uri,
-        table_name='security_price'
-    )
-
-    return price_data
-
-
-@asset(
-    description="Download stock prices for stocks passing the criteria",
-)
-def stock_prices(
-    piotroski_scores: pl.DataFrame,
-    fundamentals: pl.DataFrame
-    ) -> pl.DataFrame:
-    """Download stock prices for stocks passing the criteria.
-
-    Args:
-        piotroski_scores (pl.DataFrame): The Piotroski F-Score data
-        updated_fundamentals (pl.DataFrame): The updated fundamentals
-
-    Returns:
-        pl.DataFrame: The stock prices
-    """
-
-    # Initialize SSH tunnel to Postgres database
-    pg_config = PostgresConfig()
-
-    # Update security profiles, tunnel through SSH to access database
-    prices = pg_config.tunneled(
-        _update_stock_prices,
-        piotroski_scores=piotroski_scores,
-        fundamentals=fundamentals
-    )
-
-    return prices

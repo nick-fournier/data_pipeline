@@ -3,15 +3,15 @@
 import os
 
 import polars as pl
+import psycopg2
 from dagster import (
     ConfigurableIOManager,
     ConfigurableResource,
     InputContext,
+    IOManager,
     OutputContext,
 )
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, insert
-from sqlalchemy.orm import scoped_session, sessionmaker
 from sshtunnel import SSHTunnelForwarder
 
 load_dotenv("data_pipeline/.env")
@@ -119,54 +119,31 @@ class PostgresConfig(ConfigurableResource):
             return fn(conn_uri, **kwargs)
 
 
-class PostgresPolarsIOManager(ConfigurableIOManager):
-    username: str = os.getenv("POSTGRES_USER", "")
-    password: str = os.getenv("POSTGRES_PASS", "")
-    host: str = os.getenv("POSTGRES_HOST", "")
-    port: str = os.getenv("POSTGRES_PORT", "")
-    database: str = os.getenv("POSTGRES_DB", "")
+class PostgresPolarsIOManager(IOManager):
 
-    def __init__(self):
-        for attr in ["username", "password", "host", "port", "database"]:
-            assert getattr(self, attr) != "", f"Missing {attr} environment variable"
-
-
-        self.connection_url = f"postgresql://{self.username}:{self.password}@{self.host}:{self.port}/{self.database}"
-        self.engine = create_engine(self.connection_url)
-        self.Session = scoped_session(sessionmaker(bind=self.engine))
+    def __init__(self, postgres_config: PostgresConfig):
+        self.postgres_config = postgres_config
 
     def handle_output(self, context: OutputContext, obj: pl.DataFrame):
-        assert context.metadata is not None, "No metadata found"
-        model_class = context.metadata.get('write', None)
-        if model_class is None:
-            raise Exception("No write metadata found")
 
-        # Convert Polars DataFrame to a list of dictionaries
-        data = obj.to_dicts()
+        metadata: dict = getattr(context, "metadata", {})
 
-        with self.Session() as session:
-            try:
-                session.execute(insert(model_class), data)
-                session.commit()
-            except:
-                session.rollback()
-                raise
-            finally:
-                session.close()
+        method = metadata.get("method", "fail")
+        if method == "skip":
+            return
+
+        # Connect to PostgreSQL and insert data
+        obj.write_database(
+            table_name=context.step_key,
+            connection=self.postgres_config.db_uri(),
+            if_table_exists=method,
+        )
 
     def load_input(self, context: InputContext) -> pl.DataFrame:
-        assert context.metadata is not None, "No metadata found"
-        model_class = context.metadata.get('read', None)
-        if model_class is None:
-            raise Exception("No read metadata found")
+        # Connect to PostgreSQL and read data into a Polars DataFrame
+        df = pl.read_database_uri(
+            query=f"SELECT * FROM {context.name}",
+            uri=self.postgres_config.db_uri()
+        )
 
-        with self.Session() as session:
-            try:
-                result = session.query(model_class).all()
-            finally:
-                session.close()
-
-        # Convert the result to a Polars DataFrame
-        df = pl.DataFrame(result)
         return df
-
