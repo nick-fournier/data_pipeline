@@ -8,270 +8,152 @@
 
 """
 
-import numpy as np
-import pandas as pd
-import scipy.stats as stats
+import datetime
 
+import polars as pl
+from dagster import asset
+from pydantic import BaseModel
 from pypfopt.discrete_allocation import DiscreteAllocation
 from pypfopt.efficient_frontier import EfficientFrontier
 from pypfopt.objective_functions import L2_reg
 from pypfopt.risk_models import CovarianceShrinkage
-from sklearn.linear_model import LinearRegression
-from sklearn.neural_network import MLPRegressor
-
-from ..resources.models import Scores, SecurityPrice, SecurityList
-
-from ..models import Portfolio, Scores, SecurityList, SecurityPrice
-from ..optimizer.piotroski_fscore import GetFscore
 
 
-def pct_change_from_first(x):
-    return (x - x.iloc[0])/x.iloc[0]
+class OptimizeConfigs(BaseModel):
+    investment_amount: int = 10000
+    threshold: int = 6
+    objective: str = 'max_sharpe'
+    l2_gamma: int = 2
+    risk_aversion: int = 1
+    backcast: bool = False
 
-def rescore(z, mean, sd):
-    return z * sd + mean
+def quarter_dates(year, quarter):
+    quarter_dates = {
+        1: (
+            datetime.date(year, 1, 1),
+            datetime.date(year, 3, 31),
+            ),
+        2: (
+            datetime.date(year, 4, 1),
+            datetime.date(year, 6, 30),
+            ),
+        3: (
+            datetime.date(year, 7, 1),
+            datetime.date(year, 9, 30),
+            ),
+        4: (
+            datetime.date(year, 10, 1),
+            datetime.date(year, 12, 31),
+            ),
+    }
 
-def minmax(v):
-    return (v - v.min()) / (v.max() - v.min())
-
-def get_analysis_data():
-    score_cols = ['security_id', 'date', 'security__symbol', 'fiscal_year',
-                  'pf_score', 'pf_score_weighted', 'eps', 'pe_ratio', 'roa', 'cash', 'cash_ratio',
-                  'delta_cash', 'delta_roa', 'accruals', 'delta_long_lev_ratio',
-                  'delta_current_lev_ratio', 'delta_shares', 'delta_gross_margin', 'delta_asset_turnover']
-
-    # financials = models.Fundamentals.objects.all().values('security_id', 'date')
-    prices_qry = SecurityPrice.objects.all().values('security_id', 'date', 'close')
-    scores_qry = Scores.objects.all().values(*score_cols)
-
-    # As dataframe
-    # financials = pd.DataFrame(financials)
-    prices = pd.DataFrame(prices_qry)
-    df = pd.DataFrame(scores_qry).rename(columns={'security__fundamentals__fiscal_year': 'year'})
-
-    pd.DataFrame(Scores.objects.all().values('security_id', 'date', 'security__fundamentals__fiscal_year'))
-
-    # update scores
-    # pfobject = GetFscore()
-    # pfobject.save_scores()
-
-    # Aggregate price data annually
-    prices.close = prices.close.astype(float)
-    prices.date = pd.to_datetime(prices.date)
-
-    col_names = {'date': 'year', 'last': 'yearly_close', 'var': 'variance'}
-    prices_year = prices.groupby([prices.date.dt.year, 'security_id']).close\
-        .agg(['last', 'mean', 'var']).reset_index()\
-        .rename(columns=col_names)
-
-    # Add year and merge prices
-    df.date = pd.to_datetime(df.date)
-    df.rename(columns={'fiscal_year': 'year'}, inplace=True)
-    df = df.merge(prices_year, on=['security_id', 'year'])
-
-    # df.yearly_close = df.yearly_close.astype(float)
-    df.pe_ratio = df.pe_ratio.astype(float)
-    df = df.sort_values(['security_id', 'date'])
-
-    return df
-
-class OptimizePorfolio:
-    def __init__(self,
-                 investment_amount=10000,
-                 threshold=6,
-                 objective='max_sharpe',
-                 method='nn',
-                 l2_gamma=2,
-                 risk_aversion=1,
-                 backcast=False
-                 ):
-        
-        
-        self.investment_amount = investment_amount
-        self.threshold = threshold
-        self.objective = objective
-        self.method = method
-        self.l2_gamma = l2_gamma
-        self.risk_aversion = risk_aversion
-        self.backcast = backcast
-        
-        data = get_analysis_data()
-        expected_returns = self.forecast_expected_returns(data)
-        self.portfolio = self.optimize(expected_returns=expected_returns)
-        # self.save_portfolio()
-
-    def forecast_expected_returns(self, company_df):
-
-        x_cols = ['roa', 'cash_ratio', 'delta_cash', 'delta_roa', 'accruals', 'delta_long_lev_ratio',
-                  'delta_current_lev_ratio', 'delta_shares', 'delta_gross_margin', 'delta_asset_turnover']
-
-        model_df = company_df.set_index(['security_id', 'year'])[x_cols + ['yearly_close']].copy().astype(float)
-
-        # Get lagged value of features from t-1
-        model_df['lag_close'] = model_df.groupby('security_id', group_keys=False)['yearly_close'].shift(-1)
-
-        # Normalize close price within group since that's company-level feature, all else are high level
-        df_grps = model_df[~model_df.lag_close.isnull()].groupby('security_id', group_keys=False)
-        model_df.loc[~model_df.lag_close.isnull(), 'norm_lag_close'] = df_grps['lag_close'].apply(stats.zscore)
-
-        # Drop/fill NA and normalize
-        model_df = model_df.dropna(subset=x_cols)
-        model_df.loc[:, x_cols] = model_df[x_cols].apply(stats.zscore)
-
-        # Store mean and std dev for later
-        grp_stats = df_grps['lag_close'].agg(mean=np.mean, std=np.std)
-
-        # temporary fy column to groupby on easily...
-        model_df['fy'] = model_df.index.get_level_values('year')
-
-        # Initalize DF to join to
-        i = model_df.fy.min() + 1
-
-        if not self.backcast:
-            i = model_df.fy.max()
-
-        while i <= model_df.fy.max():
-            # Model matrix for time<i
-            df_t = model_df[model_df.fy < i]
-            # Drop any missing years
-            df_t = df_t[~df_t.norm_lag_close.isna()]
-            # Prediction matrix for time i
-            df_t0 = model_df[model_df.fy == i]
-
-            # Assemble matrices
-            y = df_t['norm_lag_close']#.to_numpy()
-            x = df_t[x_cols].astype(float)#.to_numpy()
-
-            # Estimate model
-            if self.method == 'nn':
-                model = MLPRegressor(max_iter=1000).fit(x, y)
-            else:
-                model = LinearRegression().fit(x, y)
-                print(pd.Series(list(model.coef_), index=x_cols))
-            print(f'R^2 = {model.score(x, y)}')
+    return quarter_dates[quarter]
 
 
-            # Make predictions
-            yhat = pd.DataFrame(model.predict(df_t0[x_cols]), index=df_t0.index, columns=['yhat']).join(grp_stats)
-            yhat['next_close'] = yhat.apply(lambda row: rescore(row['yhat'], row['mean'], row['std']), axis=1)
+@asset(
+    description="Optimize portfolio allocation based on expected returns",
+    io_manager_key="pgio_manager",
+)
+def optimize(
+    context,
+    expected_returns: pl.DataFrame,
+    security_price: pl.DataFrame,
+    fundamentals: pl.DataFrame,
+    ) -> None:
 
-            # Calculate returns
-            model_df.loc[yhat.index, yhat.columns] = yhat
-            i += 1
+    # Connection to database
+    pg_config = context.resources.pgio_manager.postgres_config
 
-        # Expected returns as percent change
-        expected_returns = model_df.apply(lambda x: (x.next_close - x.yearly_close)/x.yearly_close, axis=1)
-        expected_returns.name = 'expected_returns'
-
-        return expected_returns
-
-    def optimize(self, expected_returns):
-
-        # Check type
-        
-        investment_amount = int(self.investment_amount)
-
-        # # Forecast expected returns
-        returns_df = expected_returns[~expected_returns.isna()]
-
-        # Remove companies below score threshold
-        returns_ids = returns_df.index.get_level_values('security_id').unique()
-
-        # Find company IDs above threshold for current year and has forecasted return data available
-        sq = Scores.objects.filter(security_id=OuterRef('security_id')).order_by('-fiscal_year')
-        security_ids = list(
-            Scores.objects.filter(
-                Q(pk=Subquery(sq.values('pk')[:1])) & Q(pf_score__gte=self.threshold) & Q(security_id__in=returns_ids)
-            ).values_list('security_id', flat=True)
+    # Load existing portfolio data
+    try:
+        existing_portfolios = pl.read_database_uri(
+            query="SELECT fundamentals_id FROM portfolio",
+            uri=pg_config.db_uri(),
         )
 
-        # Some formatting
-        prices = SecurityPrice.objects.filter(security_id__in=security_ids)
-        prices = pd.DataFrame(prices.values('security_id', 'date', 'close'))
-        prices.date = pd.to_datetime(prices.date)
-        prices['year'] = prices.date.dt.year
-        prices.close = prices.close.astype(float)
+    except RuntimeError:
+        existing_portfolios = pl.DataFrame(schema={'fundamentals_id': pl.Int64()})
 
-        # Get price data to wide
-        prices = prices.drop_duplicates()
-        # prices_wide = {yr: df.pivot(index='date', columns='security_id', values='close').dropna() for yr, df in prices.groupby('year')}
-        # prices_wide = prices.pivot(index='date', columns='security_id', values='close').dropna()
+    # Find missing fundamentals_id in portfolio
+    new_expected_returns = expected_returns.filter(
+        ~pl.col('fundamentals_id').is_in(existing_portfolios['fundamentals_id'])
+    ).join(
+        fundamentals.select('id', 'as_of_date', 'quarter'),
+        left_on='fundamentals_id',
+        right_on='id',
+        how='inner'
+    )
 
-        weights_dict = {}
-        for year, exp_df in returns_df.groupby(level='year'):
+    # Get price data for the target stocks
+    security_ids = new_expected_returns['symbol'].unique()
+    prices = security_price.filter(
+        pl.col('symbol').is_in(security_ids),
+    )
 
-            # Get prices for available stocks, # Remove companies below score threshold
-            exp_ids = exp_df.index.get_level_values('security_id').unique()
-            year_ids = list(set(security_ids).intersection(exp_ids))
+    # Process the efficient frontier prices up to current quarter
+    for (quarter,), exp_df in new_expected_returns.group_by(['year', 'quarter']):
 
-            # Cast prices data to wide form
-            prices_wide = prices[prices.year == year]\
-                .pivot(index='date', columns='security_id', values='close')\
-                .dropna()
+        # Quarter date range
+        _, qdate_end = quarter_dates(quarter, quarter)
 
-            # make data consistent
-            exp_df = exp_df.loc[security_ids]
-            these_prices = prices_wide[year_ids]
+        # Skip if current quarter
+        if quarter == 1:
+            continue
 
-            # Calculate covariance matrix
-            prices_cov = CovarianceShrinkage(these_prices).ledoit_wolf()
+        if not isinstance(qdate_end, datetime.date):
+            raise ValueError("as_of_date must be a datetime.date object")
 
-            # Optimize efficient frontier of Mean Variance
-            ef = EfficientFrontier(exp_df.to_numpy(), prices_cov)
-            # Reduces 0 weights
-            ef.add_objective(L2_reg, gamma=self.l2_gamma)
+        # Get prices up to the last date of the quarter
+        prices = security_price.filter(
+            pl.col('symbol').is_in(exp_df['symbol']),
+            pl.col('date') <= qdate_end,
+        )
 
-            # Get the allocation weights
-            if self.objective == 'max_sharpe':
-                weights_dict[year] = ef.max_sharpe()
-            elif self.objective == 'max_quadratic_utility':
-                weights_dict[year] = ef.max_quadratic_utility(risk_aversion=self.risk_aversion)
-            else:
-                weights_dict[year] = ef.min_volatility()
+        # Pivot prices to wide form for covariance calculation
+        prices_wide = prices.pivot(
+            on='symbol', values='close', index='date',
+        ).drop_nulls().to_pandas().set_index('date')
 
+        # Calculate covariance matrix
+        prices_cov = CovarianceShrinkage(prices_wide).ledoit_wolf()
+
+        # Optimize efficient frontier of Mean Variance
+        ef = EfficientFrontier(exp_df.to_numpy(), prices_cov)
+
+        # Reduces 0 weights
+        ef.add_objective(L2_reg, gamma=OptimizeConfigs.l2_gamma)
+
+        # Get the allocation weights
+        if OptimizeConfigs.objective == 'max_sharpe':
+            weights = ef.max_sharpe()
+
+        elif OptimizeConfigs.objective == 'max_quadratic_utility':
+
+            weights = ef.max_quadratic_utility(risk_aversion=OptimizeConfigs.risk_aversion)
+
+        else:
+            weights = ef.min_volatility()
 
         # Discrete allocation from portfolio value
-        portfolio_year = max(weights_dict.keys())
-        latest_weights = weights_dict[portfolio_year]
-        # Only do this for current year. Everything prior can be unitless
-        latest_prices = prices.loc[prices.groupby('security_id').date.idxmax()].set_index('security_id')
-        
-        disc_allocation, cash = DiscreteAllocation(latest_weights,
-                                                   latest_prices.close,
-                                                   total_portfolio_value=investment_amount,
-                                                   short_ratio=None).greedy_portfolio()
+        allocator = DiscreteAllocation(
+            weights,
+            prices['close'],
+            total_portfolio_value=OptimizeConfigs.investment_amount,
+            short_ratio=None,
+        )
+        disc_allocation, cash = allocator.greedy_portfolio()
 
         # Format into dataframe
-        df_allocation = pd.concat([
-            pd.Series(latest_weights, name='allocation'),
-            pd.Series(disc_allocation, name='shares')
-        ], axis=1)
-        df_allocation.index.name = 'security_id'
-        df_allocation.reset_index(inplace=True)
-        df_allocation = df_allocation.fillna(0)
+        # TODO: CHECK THIS OPERATION
+        # Want a DF with columns: fundamentals_id/security_id (?), allocation, shares
+        allocation = pl.hstack([
+            pl.Series(name='allocation', values=weights),
+            pl.Series(name='shares', values=disc_allocation),
+        ]).fill_nulls(0)
 
-        # Reindex for all 0% stocks
-        all_security_ids = list(SecurityList.objects.all().values_list('pk', flat=True))
-        
-        assert all_security_ids is not None
-        df_allocation = df_allocation.set_index('security_id').reindex(all_security_ids).fillna(0).reset_index()
-
-        # Add allocation year
-        df_allocation['year'] = portfolio_year
-
-        return df_allocation
-
-    def save_portfolio(self):
-        # Send to database
-        if not self.portfolio.empty:
-            if Portfolio.objects.exists():
-                Portfolio.objects.all().delete()
-                
-            Portfolio.objects.bulk_create(
-                Portfolio(**vals) for vals in self.portfolio.to_dict('records')
-            )
-            
-        return
+        # Extend portfolio with new allocation
+        existing_portfolios.extend(allocation)
 
 
-
+    # Update database
+    # TODO: Update database with new portfolio allocations

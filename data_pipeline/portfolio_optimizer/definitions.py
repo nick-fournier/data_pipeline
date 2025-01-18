@@ -7,6 +7,7 @@ from dagster import Definitions, load_assets_from_modules
 from data_pipeline.portfolio_optimizer.assets import (
     forecast_returns,
     fundamentals,
+    optimization,
     prices,
     scores,
     security_profiles,
@@ -21,6 +22,7 @@ all_assets = load_assets_from_modules([
         scores,
         prices,
         forecast_returns,
+        optimization,
     ])
 
 pg_config = dbconn.PostgresConfig()

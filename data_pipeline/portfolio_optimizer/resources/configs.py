@@ -18,7 +18,7 @@ class Params(Config):
     CHUNK_SIZE: int = 500
     PRICE_PERIOD: str = '10y'
     PRICE_INTERVAL: str = '1mo'
-    FSCORE_CUTOFF: int = 7
+    FSCORE_CUTOFF: int = 6
 
 # class ForecastModel(Config):
 #         x_cols = [

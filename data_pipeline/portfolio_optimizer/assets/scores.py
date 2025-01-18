@@ -37,8 +37,7 @@ from __future__ import annotations
 import polars as pl
 from dagster import asset
 
-from ..resources.dbconn import PostgresConfig
-from ..resources.dbtools import _append_data, _read_table
+from ..resources.dbtools import _append_data
 from ..resources.models import Scores
 
 NEG_SCORE_COLS = ("delta_long_lev_ratio", "delta_shares")
@@ -106,7 +105,7 @@ def calc_pf_measures(fundamentals: pl.DataFrame) -> pl.DataFrame:
         pl.DataFrame: The calculated financial measures
 
     """
-    _fundamentals = fundamentals
+    _fundamentals = fundamentals.sort(["symbol", "as_of_date"])
     for name in PFScoreMeasures.__annotations__:
         named_expr = {name: getattr(PFScoreMeasures, name)}
         _fundamentals = _fundamentals.with_columns(**named_expr)
@@ -115,24 +114,6 @@ def calc_pf_measures(fundamentals: pl.DataFrame) -> pl.DataFrame:
         )
 
     return _fundamentals.fill_nan(None)
-
-
-def z_score_df(df: pl.DataFrame) -> pl.DataFrame:
-    """Calculate the z-score for a given DataFrame.
-
-    Args:
-    ----
-        df (pl.DataFrame): The DataFrame to calculate the z-score for
-
-    Returns:
-    -------
-        pl.DataFrame: The DataFrame with the z-score calculated
-
-    """
-    return df.select([
-        ((pl.col(col) - pl.col(col).mean()) / pl.col(col).std()).alias(col)
-        for col in df.columns # if pl.col(col).is_numeric()
-    ])
 
 
 @asset(
@@ -172,7 +153,14 @@ def scores(context) -> None:
 
     outdated_fundamentals = pl.read_database_uri(query, uri)
 
-    measures = calc_pf_measures(outdated_fundamentals)
+    if outdated_fundamentals.is_empty():
+        return
+
+    # Calculate scoring metrics for each period type to handle the lead/lag
+    measures_ls = []
+    for _, grp in outdated_fundamentals.group_by('period_type'):
+        measures_ls.append(calc_pf_measures(grp))
+    measures = pl.concat(measures_ls)
 
     scoring = {
         **{k: (pl.col(k) > 0).cast(pl.Int8).fill_null(0) for k in POS_SCORE_COLS},
@@ -196,6 +184,7 @@ def scores(context) -> None:
         )
         .rename({"id": "fundamentals_id"})
         .select(Scores.__annotations__.keys())
+        .sort("fundamentals_id")
     )
 
     # Validate

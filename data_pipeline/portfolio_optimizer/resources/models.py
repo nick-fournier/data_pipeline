@@ -7,7 +7,6 @@ import pydantic as pdt
 from dagster import Config
 
 
-# TODO: Convert this to pandera for consistency
 class SecurityList(Config):
     """Configuration for the security list.
 
@@ -57,7 +56,13 @@ class Fundamentals(pa.DataFrameModel):
     symbol: pl.String
     period_type: pl.String
     as_of_date: pl.Date = pa.Field(coerce=True)
-    currency_code: str = pa.Field(
+    quarter: pl.Int32 = pa.Field(
+        ge=1, le=4, coerce=True,
+        )
+    year: pl.Int32 = pa.Field(
+        coerce=True,
+        )
+    currency_code: pl.String = pa.Field(
         default=None, coerce=True, nullable=True,
         )
     net_income: pl.Int64 = pa.Field(
@@ -68,7 +73,7 @@ class Fundamentals(pa.DataFrameModel):
         )
     gross_profit: pl.Int64 = pa.Field(
         default=None, coerce=True, nullable=True,
-    )
+        )
     total_revenue: pl.Int64 = pa.Field(
         default=None, coerce=True, nullable=True,
         )
@@ -121,6 +126,10 @@ class Scores(pa.DataFrameModel):
     fundamentals_id: pl.Int64 = pa.Field(
         description="The fundamentals ID",
         nullable=False, coerce=True, unique=True,
+        )
+    symbol: pl.String = pa.Field(
+        description="The stock symbol",
+        nullable=False,
         )
     roa: pl.Float64 = pa.Field(
         description="Return on assets",
@@ -226,4 +235,36 @@ class SecurityPrices(pa.DataFrameModel):
     splits: pl.Int64 = pa.Field(
         description="The split of the stock",
         nullable=True, coerce=True,
+        )
+
+class ExpectedReturns(pa.DataFrameModel):
+    """Configuration for the expected returns.
+
+    This configuration is used to specify the expected returns for the stock prices.
+
+    """
+
+    fundamentals_id: pl.Int32 = pa.Field(
+        description="The fundamentals ID",
+        nullable=False, coerce=True, unique=True,
+        )
+    last_close: pl.Float64 = pa.Field(
+        description="The last closing price of the stock",
+        nullable=False, coerce=True,
+        )
+    forecasted_close: pl.Float64 = pa.Field(
+        description="The forecasted closing price of the stock",
+        nullable=False, coerce=True,
+        )
+    expected_return: pl.Float64 = pa.Field(
+        description="The expected return of the stock",
+        nullable=False, coerce=True,
+        )
+    variance: pl.Float64 = pa.Field(
+        description="The variance of the stock",
+        nullable=True, coerce=True,
+        )
+    symbol: pl.String = pa.Field(
+        description="The stock symbol",
+        nullable=False,
         )

@@ -8,33 +8,41 @@
 
 """
 
+import datetime
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import polars as pl
+import statsmodels.api as sm
 from dagster import asset
 from plotly import express as px
-from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
+from sklearn.model_selection import RandomizedSearchCV
 from sklearn.neural_network import MLPRegressor
-from statsmodels.api import WLS
+from statsmodels.tsa.arima.model import ARIMA
+from tqdm import tqdm
 
-from ..resources.configs import Params
+from data_pipeline.portfolio_optimizer.resources import dbconn
+from data_pipeline.portfolio_optimizer.resources.configs import Params
+from data_pipeline.portfolio_optimizer.resources.dbtools import _append_data
+from data_pipeline.portfolio_optimizer.resources.models import ExpectedReturns
 
 # Model parameters
 X_COLS = [
-    'roa',
-    'cash_ratio',
-    'delta_cash',
-    'delta_roa',
-    'accruals',
-    'delta_long_lev_ratio',
-    'delta_current_lev_ratio',
-    'delta_shares',
-    'delta_gross_margin',
-    'delta_asset_turnover'
+    # 'roa',                      # 0
+    'cash_ratio',               # 1
+    'delta_cash',               # 2
+    # 'delta_roa',                # 3
+    'accruals',                 # 4
+    # 'delta_long_lev_ratio',     # 5
+    # 'delta_current_lev_ratio',  # 6
+    'delta_shares',             # 7
+    # 'delta_gross_margin',       # 8
+    # 'delta_asset_turnover',     # 9
+    'quarterly_yield_rate',     # 10
     ]
 
 def z_score(x):
     return (x - x.mean()) / x.std()
-
 
 def calc_average_yield(stock_prices: pl.DataFrame) -> pl.DataFrame:
 
@@ -192,19 +200,18 @@ def calc_average_yield(stock_prices: pl.DataFrame) -> pl.DataFrame:
 
     return stock_yield
 
-
-
 def prepare_data(
     fundamentals: pl.DataFrame,
     scores: pl.DataFrame,
-    stock_prices: pl.DataFrame,
+    security_price: pl.DataFrame,
+    **kwargs
     ) -> pl.DataFrame:
     """Prepare the data for forecasting expected returns.
 
     Args:
         fundamentals (pl.DataFrame): The financial fundamentals for each security
         scores (pl.DataFrame): The Piotroski F-Score for each security
-        stock_prices (pl.DataFrame): The monthly stock prices for each security
+        security_price (pl.DataFrame): The stock prices for each security
 
     Returns:
         pl.DataFrame: The prepared data for forecasting expected returns
@@ -225,11 +232,10 @@ def prepare_data(
     )
 
     # Calculate quarterly returns in price data
-    stock_yield = calc_average_yield(stock_prices)
+    stock_yield = calc_average_yield(security_price)
 
     # Join stock data onto financial data
     model_data = fin_data.join(
-        # stock_yield_simple,
         stock_yield,
         left_on=['symbol', 'year', 'quarter'],
         right_on=['symbol', 'year', 'quarter'],
@@ -237,7 +243,9 @@ def prepare_data(
     )
 
     # Sort data
-    model_data = model_data.sort('symbol', 'as_of_date')
+    model_data = model_data.sort('symbol', 'as_of_date').filter(
+        pl.col('period_type') == '3M'
+    )
 
     # Lag of quarterly yield for next quarter
     model_data = model_data.with_columns(
@@ -272,14 +280,13 @@ def prepare_data(
     description="Forecasted expected returns for each security",
     io_manager_key="pgio_manager",
 )
-def forecasted_returns(
+def expected_returns(
+    context,
     fundamentals: pl.DataFrame,
-    scores: pl.DataFrame,
     security_price: pl.DataFrame,
-    ) -> pl.DataFrame:
+    ) -> None:
     """
-    Forecasted expected returns for each security based on
-    the Piotroski F-Score and financial fundamentals.
+    Naive ARIMA model based on security price only
 
     Args:
         fundamentals (pl.DataFrame): The financial fundamentals for each security
@@ -287,103 +294,149 @@ def forecasted_returns(
         security_prices (pl.DataFrame): The monthly stock prices for each security
 
     Returns:
-        pl.DataFrame: The forecasted expected returns for each security
+        None - database updated
     """
+    # Setup database connection
+    pg_config = context.resources.pgio_manager.postgres_config
 
-    # Get the prepared data
-    model_data = prepare_data(fundamentals, scores, security_price)
+    # Model data
+    # model_data = prepare_data(fundamentals, scores, security_price)
 
-    # Separate the future prediction rows from the training rows
-    est_data = model_data.filter(pl.col('next_quarterly_yield').is_not_null())
-    pred_data = model_data.filter(pl.col('next_quarterly_yield').is_null())
+    # Fetch existing forecasts
+    try:
+        existing_forecasts = pl.read_database_uri(
+            query="SELECT fundamentals_id FROM forecasted_returns",
+            uri=pg_config.db_uri(),
+        )
+    except RuntimeError:
+        existing_forecasts = pl.DataFrame(schema={'fundamentals_id': pl.Int64()})
 
-    # Drop/fill NA and normalize
-    # model_data = model_data.drop_nulls()
-
-    # Normalize financial data on z-score
-    x_train = est_data.with_columns(
-        **{
-            k: z_score(pl.col(k)) for k in X_COLS
-        }
+    # Find which fundamentals_id are missing a forecasted value, excluding TTM
+    ood_fundamentals = fundamentals.filter(
+        ~pl.col('id').is_in(existing_forecasts['fundamentals_id']),
+        pl.col('period_type') == '3M',
     )
 
-    x_pred = pred_data.with_columns(
-        **{
-            k: z_score(pl.col(k)) for k in X_COLS
-        }
-    ).drop('next_quarterly_yield')
+    # If empty, proceed, nothing to update
+    if ood_fundamentals.is_empty():
+        return
 
-
-    # Setup test and train data
-    x_train = x_train.select(X_COLS).to_pandas()
-    # x['intercept'] = 1
-    y_train = est_data['next_quarterly_yield'].to_numpy()
-    w_train = est_data['r_squared'].to_numpy()
-
-
-    # Setup test data
-    x_pred = pred_data.select(X_COLS).to_pandas()
-    w_pred = pred_data['r_squared'].to_numpy()
-
-    # Estimate model
-    # model = WLS(y, x, weights=w).fit() # type: ignore
-    model = MLPRegressor(
-        hidden_layer_sizes=(100, 50),
-        activation='tanh',
-        solver='sgd',
-        alpha=0.01,
-        learning_rate_init=0.01,
-        max_iter=500,
-        random_state=42,
+    # Previous quarter end date
+    ood_fundamentals = ood_fundamentals.with_columns(
+        last_as_of_date=pl.col('as_of_date').shift(-1).over('symbol')
     )
 
-    # Fit the model
-    model.fit(x_train, y_train)
+    # Iterate over fundamentals
+    _iter = ood_fundamentals.select(['id', 'symbol', 'last_as_of_date']).iter_rows()
+    total = ood_fundamentals['id'].n_unique()
+    forecasts = []
 
-    # Create predictions dataframe with fundamentals_id
-    predicted = pl.Series(model.predict(x_pred))
-    expected_returns = pred_data.with_columns(
-        expected_returns=predicted,
+    def process_forecast(id, symbol, last_as_of_date, security_price):
+        price_df = security_price.filter(
+            (pl.col('symbol') == symbol) &
+            (pl.col('date') <= last_as_of_date),
+        )
+
+        # Skip if less than 3 months of data
+        if price_df.shape[0] < 3:
+            return None
+
+        try:
+            return (id, *arima_forecast(price_df))
+
+        except Exception as e:
+            print(f"Error processing {symbol}: {e}")
+            return None
+
+    # Process and populate the expected_returns dataframe
+    with ThreadPoolExecutor() as executor:
+        futures = [
+            executor.submit(process_forecast, id, symbol, last_as_of_date, security_price)
+            for id, symbol, last_as_of_date in tqdm(_iter, total=total)
+        ]
+
+        for future in tqdm(futures, total=total):
+            result = future.result()
+            if result:
+                forecasts.append(result)
+
+
+    # # Initialize empty dataframe to store forecasts using ExpectedReturns schema
+    schema = {k: v.type for k,v in ExpectedReturns.to_schema().dtypes.items()}
+
+    # Create a Polars DataFrame from the list of tuples
+    expected_returns = pl.DataFrame(
+        forecasts,
+        schema=schema,
+        orient='row',
     )
+
+    # Drop rows where last_close or forecasted_close is NULL or not finite
+    expected_returns_clean = expected_returns.filter(
+        pl.col('last_close').is_finite(),
+        pl.col('forecasted_close').is_finite()
+    )
+
+    # Validate
+    expected_returns_clean: pl.DataFrame = ExpectedReturns.validate(
+        expected_returns_clean) # type: ignore
+
+    # Update database
+    _append_data(
+        uri=pg_config.db_uri(),
+        table_name="expected_returns",
+        new_data=expected_returns_clean,
+        pk=["fundamentals_id"],
+    )
+
+
+# Naive ARIMA model based on security price only
+def arima_forecast(price_df: pl.DataFrame) -> tuple:
+    """Helper function to forecast using ARIMA model
+
+    Args:
+        price_df (pl.DataFrame): The price data for a single security
+
+    Returns:
+        tuple: A tuple of
+            - last close price,
+            - forecasted close price,
+            - expected return, and
+            - variance
+    """
+    # Sort date
+    df = price_df.sort('date')
+
+    # Fit the ARIMA model
+    model = ARIMA(df['close'].to_numpy(), order=(3, 2, 0))
+    model_fit = model.fit()
+
+    # If model throws a warning, raise an exception
+    if model_fit.mle_retvals['converged'] is False:
+        raise ValueError("Model did not converge")
+
+    # Make predictions
+    yhat = model_fit.forecast(steps=3)[-1]
+    last_date = df['date'].max()
+    last_close = df.filter(pl.col('date') == last_date)['close'].to_numpy()[0]
+    variance = model_fit.resid.var()
 
     if False:
-        # Baseline model
-        ols_fit = WLS(y_train, x_train, weights=w_train).fit() # type: ignore
-        print(ols_fit.summary())
+        # Plot forecast, 3 new rows, 30 days each
+        new_date = last_date + datetime.timedelta(days=30*3)
+        forecast_df = pl.concat(
+            [
+                df.with_columns(type=pl.lit('data')).select('date', 'close', 'type'),
+                pl.DataFrame(
+                    {
+                        'date': [last_date, new_date],
+                        'close': [last_close, yhat],
+                        'type': ['forecast']*2
+                    })
+            ])
 
-        # Neural network model
-        mlp = MLPRegressor(random_state=42)
+        # Add a month to the last date
+        px.line(forecast_df, x='date', y='close', color='type').show()
 
-        param_distributions = {
-            'hidden_layer_sizes': [
-                (50, 50), (100, 50), (100, 100), (100, 100, 100), (50, 50, 50), (100, 100, 100)
-                ],
-            'activation': ['relu', 'tanh'],
-            'solver': ['adam', 'sgd'],
-            'alpha': [0.0001, 0.001, 0.01],
-            'learning_rate_init': [0.001, 0.01, 0.1],
-            'max_iter': [200, 500],
-        }
+    return (last_close, yhat, (yhat - last_close) / last_close, variance)
 
-        random_search = RandomizedSearchCV(
-            estimator=mlp,
-            param_distributions=param_distributions,
-            n_iter=50,  # Limit number of combinations to test
-            cv=3,
-            scoring='neg_mean_squared_error',
-            n_jobs=-1,
-            random_state=42,
-        )
-        random_search.fit(x_pred, y_train)
-        random_search.best_params_
-
-        nn_model = random_search.best_estimator_
-
-        # Scatter plot of actual vs predicted
-        compare_ols = pl.DataFrame({'actual': y_train, 'predicted': ols_fit.predict(x_train)})
-        px.scatter(compare_ols, x='actual', y='predicted').show()
-
-        compare_nn = pl.DataFrame({'actual': y_train, 'predicted': nn_model.predict(x_train)})
-        px.scatter(compare_nn, x='actual', y='predicted').show()
-
-    return expected_returns
