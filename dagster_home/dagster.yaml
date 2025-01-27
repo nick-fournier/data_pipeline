@@ -5,7 +5,7 @@ storage:
         env: POSTGRES_USER
       password:
         env: POSTGRES_PASS
-      hostname: orange
+      hostname: thinkbox
       port: 
         env: POSTGRES_PORT
       db_name: dagster
