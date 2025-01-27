@@ -9,45 +9,28 @@
 """
 
 import datetime
+from enum import Enum
 
 import polars as pl
 from dagster import asset
-from pydantic import BaseModel
 from pypfopt.discrete_allocation import DiscreteAllocation
 from pypfopt.efficient_frontier import EfficientFrontier
 from pypfopt.objective_functions import L2_reg
 from pypfopt.risk_models import CovarianceShrinkage
 
+from data_pipeline.portfolio_optimizer.resources.dbtools import _append_data
+from data_pipeline.portfolio_optimizer.resources.models import Portfolio
+from data_pipeline.portfolio_optimizer.utils import quarter_dates
 
-class OptimizeConfigs(BaseModel):
-    investment_amount: int = 10000
-    threshold: int = 6
-    objective: str = 'max_sharpe'
-    l2_gamma: int = 2
-    risk_aversion: int = 1
-    backcast: bool = False
 
-def quarter_dates(year, quarter):
-    quarter_dates = {
-        1: (
-            datetime.date(year, 1, 1),
-            datetime.date(year, 3, 31),
-            ),
-        2: (
-            datetime.date(year, 4, 1),
-            datetime.date(year, 6, 30),
-            ),
-        3: (
-            datetime.date(year, 7, 1),
-            datetime.date(year, 9, 30),
-            ),
-        4: (
-            datetime.date(year, 10, 1),
-            datetime.date(year, 12, 31),
-            ),
-    }
-
-    return quarter_dates[quarter]
+class OptimizeConfigs(Enum):
+    investment_amount = 10000
+    threshold = 6
+    objective = 'max_sharpe'
+    l2_gamma = 2
+    risk_aversion = 1
+    backcast = False
+    risk_free_rate = 0.04
 
 
 @asset(
@@ -78,27 +61,27 @@ def optimize(
     new_expected_returns = expected_returns.filter(
         ~pl.col('fundamentals_id').is_in(existing_portfolios['fundamentals_id'])
     ).join(
-        fundamentals.select('id', 'as_of_date', 'quarter'),
+        fundamentals.select('id', 'as_of_date', 'quarter', "year"),
         left_on='fundamentals_id',
         right_on='id',
         how='inner'
     )
 
-    # Get price data for the target stocks
-    security_ids = new_expected_returns['symbol'].unique()
-    prices = security_price.filter(
-        pl.col('symbol').is_in(security_ids),
-    )
 
     # Process the efficient frontier prices up to current quarter
-    for (quarter,), exp_df in new_expected_returns.group_by(['year', 'quarter']):
+    grouper = new_expected_returns.sort(
+        'as_of_date', descending=True,
+    ).group_by(['year', 'quarter'], maintain_order=True)
+
+    schema = {k: v.dtype.type for k, v in Portfolio.to_schema().columns.items()}
+    new_portfolio = pl.DataFrame(schema=schema)
+
+    for (year, quarter,), exp_df in grouper:
 
         # Quarter date range
-        _, qdate_end = quarter_dates(quarter, quarter)
+        _, qdate_end = quarter_dates(year, quarter)
 
-        # Skip if current quarter
-        if quarter == 1:
-            continue
+        print("Optimizing for quarter:", year, quarter)
 
         if not isinstance(qdate_end, datetime.date):
             raise ValueError("as_of_date must be a datetime.date object")
@@ -116,44 +99,71 @@ def optimize(
 
         # Calculate covariance matrix
         prices_cov = CovarianceShrinkage(prices_wide).ledoit_wolf()
+        exp_returns = exp_df.to_pandas().set_index('symbol')["expected_return"]
 
         # Optimize efficient frontier of Mean Variance
-        ef = EfficientFrontier(exp_df.to_numpy(), prices_cov)
-
-        # Reduces 0 weights
-        ef.add_objective(L2_reg, gamma=OptimizeConfigs.l2_gamma)
+        ef = EfficientFrontier(exp_returns, prices_cov)
 
         # Get the allocation weights
-        if OptimizeConfigs.objective == 'max_sharpe':
-            weights = ef.max_sharpe()
+        objective = OptimizeConfigs.objective.value
+        if objective == 'max_sharpe':
+            weights = ef.max_sharpe(
+                risk_free_rate=OptimizeConfigs.risk_free_rate.value,
+            )
 
-        elif OptimizeConfigs.objective == 'max_quadratic_utility':
+        elif objective == 'max_quadratic_utility':
+            # Reduces 0 weights
+            ef.add_objective(L2_reg, gamma=OptimizeConfigs.l2_gamma.value)
+            weights = ef.max_quadratic_utility(
+                risk_aversion=OptimizeConfigs.risk_aversion.value,
+            )
 
-            weights = ef.max_quadratic_utility(risk_aversion=OptimizeConfigs.risk_aversion)
+        elif objective == 'min_volatility':
+            # Reduces 0 weights
+            # ef.add_objective(L2_reg, gamma=OptimizeConfigs.l2_gamma.value)
+            weights = ef.min_volatility()
 
         else:
-            weights = ef.min_volatility()
+            raise ValueError("Invalid objective function")
+
+        # Latest prices for each security
+        latest_prices = (
+            prices.sort('date')
+            .group_by('symbol').last()
+            .select('symbol', 'close')
+            .to_pandas().set_index('symbol')['close']
+        )
 
         # Discrete allocation from portfolio value
         allocator = DiscreteAllocation(
             weights,
-            prices['close'],
-            total_portfolio_value=OptimizeConfigs.investment_amount,
+            latest_prices,
+            total_portfolio_value=OptimizeConfigs.investment_amount.value,
             short_ratio=None,
         )
-        disc_allocation, cash = allocator.greedy_portfolio()
+        allocation, cash = allocator.greedy_portfolio()
 
         # Format into dataframe
-        # TODO: CHECK THIS OPERATION
-        # Want a DF with columns: fundamentals_id/security_id (?), allocation, shares
-        allocation = pl.hstack([
-            pl.Series(name='allocation', values=weights),
-            pl.Series(name='shares', values=disc_allocation),
-        ]).fill_nulls(0)
+        combined = []
+        for symbol, fund_id in exp_df.select('symbol', 'fundamentals_id').iter_rows():
+            row = (fund_id, symbol, allocation.get(symbol, 0), weights.get(symbol, 0))
+            combined.append(row)
+
+        _portfolio = pl.DataFrame(
+            combined,
+            orient='row',
+            schema=["fundamentals_id", "symbol", "shares", "allocation"],
+        )
+
+        _portfolio_valid: pl.DataFrame = Portfolio.validate(_portfolio) # type: ignore
 
         # Extend portfolio with new allocation
-        existing_portfolios.extend(allocation)
+        new_portfolio.extend(_portfolio_valid.select(new_portfolio.columns))
 
-
-    # Update database
-    # TODO: Update database with new portfolio allocations
+    # Append to database
+    _append_data(
+        uri=pg_config.db_uri(),
+        table_name="portfolio",
+        new_data=new_portfolio,
+        pk=["fundamentals_id"],
+    )
