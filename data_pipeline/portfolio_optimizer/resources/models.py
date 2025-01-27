@@ -228,14 +228,14 @@ class SecurityPrices(pa.DataFrameModel):
         description="The volume of the stock",
         nullable=True, coerce=True,
         )
-    dividends: pl.Float64 = pa.Field(
-        description="The dividends of the stock",
-        nullable=True, coerce=True,
-        )
-    splits: pl.Int64 = pa.Field(
-        description="The split of the stock",
-        nullable=True, coerce=True,
-        )
+    # dividends: pl.Float64 = pa.Field(
+    #     description="The dividends of the stock",
+    #     nullable=True, coerce=True,
+    #     )
+    # splits: pl.Int64 = pa.Field(
+    #     description="The split of the stock",
+    #     nullable=True, coerce=True,
+    #     )
 
 class ExpectedReturns(pa.DataFrameModel):
     """Configuration for the expected returns.
@@ -267,4 +267,28 @@ class ExpectedReturns(pa.DataFrameModel):
     symbol: pl.String = pa.Field(
         description="The stock symbol",
         nullable=False,
+        )
+
+
+class Portfolio(pa.DataFrameModel):
+    """Configuration for the portfolio allocation.
+
+    This configuration is used to specify the portfolio allocation.
+    """
+
+    fundamentals_id: pl.Int32 = pa.Field(
+        description="The fundamentals ID",
+        nullable=False, coerce=True,
+        )
+    symbol: pl.String = pa.Field(
+        description="The stock symbol",
+        nullable=False,
+        )
+    allocation: pl.Float64 = pa.Field(
+        description="The allocation of the stock in the portfolio",
+        nullable=False, coerce=True,
+        )
+    shares: pl.Int64 = pa.Field(
+        description="The number of shares in the portfolio",
+        nullable=False, coerce=True,
         )

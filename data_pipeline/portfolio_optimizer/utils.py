@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 """Module contains utilities for the data pipeline."""
 
+import datetime
+
 exceptions: dict = {
     "symbol": "symbol",
     "periodType": "period_type",
@@ -10,6 +12,30 @@ exceptions: dict = {
 }
 
 _exceptions = {v: k for k, v in exceptions.items()}
+
+
+def quarter_dates(year, quarter):
+    quarter_dates = {
+        1: (
+            datetime.date(year, 1, 1),
+            datetime.date(year, 3, 31),
+            ),
+        2: (
+            datetime.date(year, 4, 1),
+            datetime.date(year, 6, 30),
+            ),
+        3: (
+            datetime.date(year, 7, 1),
+            datetime.date(year, 9, 30),
+            ),
+        4: (
+            datetime.date(year, 10, 1),
+            datetime.date(year, 12, 31),
+            ),
+    }
+
+    return quarter_dates[quarter]
+
 
 def camel_case(field: str) -> str:
     """Convert field to camel case.

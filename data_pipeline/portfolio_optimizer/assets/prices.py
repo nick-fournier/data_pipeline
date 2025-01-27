@@ -1,13 +1,16 @@
 #!/usr/bin/env python
 """For the stocks passing the criteria, fetch the last X years of price data."""
 
+import datetime
+
 import polars as pl
 import yahooquery as yq
 from dagster import asset
 
-from ..resources.configs import Params
-from ..resources.dbtools import _append_data
-from ..resources.models import SecurityPrices
+from data_pipeline.portfolio_optimizer.resources.configs import Params
+from data_pipeline.portfolio_optimizer.resources.dbtools import _append_data
+from data_pipeline.portfolio_optimizer.resources.models import SecurityPrices
+from data_pipeline.portfolio_optimizer.utils import quarter_dates
 
 
 @asset(
@@ -37,6 +40,12 @@ def security_price(
     # Get the configuration parameters
     params = Params()
 
+    # Get last quarter date
+    now = datetime.datetime.now()
+    year = (now - datetime.timedelta(days=90)).year
+    quarter = ((now.month // 3) - 1) % 4 + 1
+    _, qend = quarter_dates(year, quarter)
+
     # Join symbol from fundamentals to piotroski_scores
     piotroski_scores = scores.join(
         fundamentals.select(['id', 'symbol']),
@@ -45,18 +54,35 @@ def security_price(
         how='inner'
     )
 
-    # Get symbols for stocks passing the criteria
+    # Filter out symbols with no price data past last quarter end date
+    query = f"""
+        SELECT symbol
+        FROM security_price
+        GROUP BY symbol
+        HAVING MAX(date) <= '{qend}'
+    """
+    ood_symbols = pl.read_database_uri(
+        query=query,
+        uri=uri
+    )['symbol'].unique()
+
+
+    # Get symbols for out-of-date stocks passing the criteria
     symbols = piotroski_scores.filter(
-        pl.col('pf_score') > params.FSCORE_CUTOFF
+        (pl.col('pf_score') > params.FSCORE_CUTOFF) &
+        (pl.col('symbol').is_in(ood_symbols))
     )['symbol'].unique()
 
     # Get latest price data from Yahoo Finance
     stock_data = yq.Ticker(symbols.to_list())
-    latest_price_data = pl.DataFrame(
-        stock_data.history(
+
+    pd_price_data = stock_data.history(
             period=params.PRICE_PERIOD,
             interval=params.PRICE_INTERVAL
-        ).reset_index()
+        )
+
+    latest_price_data = pl.DataFrame(
+        pd_price_data.reset_index()
     )
 
     # Validate and trim price data
