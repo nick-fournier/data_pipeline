@@ -2,6 +2,7 @@
 """For the stocks passing the criteria, fetch the last X years of price data."""
 
 import datetime
+import random
 
 import polars as pl
 import yahooquery as yq
@@ -54,6 +55,12 @@ def security_price(
         how='inner'
     )
 
+    # All symbols with no price data
+    all_symbols = pl.read_database_uri(
+        query="SELECT DISTINCT symbol FROM security_price",
+        uri=uri
+    )['symbol']
+
     # Filter out symbols with no price data past last quarter end date
     query = f"""
         SELECT symbol
@@ -69,30 +76,74 @@ def security_price(
 
     # Get symbols for out-of-date stocks passing the criteria
     symbols = piotroski_scores.filter(
-        (pl.col('pf_score') > params.FSCORE_CUTOFF) &
-        (pl.col('symbol').is_in(ood_symbols))
+        (pl.col('pf_score') > params.FSCORE_CUTOFF) & (
+            (pl.col('symbol').is_in(ood_symbols)) |
+            (~pl.col('symbol').is_in(all_symbols))
+        )
     )['symbol'].unique()
 
-    # Get latest price data from Yahoo Finance
-    stock_data = yq.Ticker(symbols.to_list())
+    if symbols.shape[0] == 0:
+        return
 
-    pd_price_data = stock_data.history(
-            period=params.PRICE_PERIOD,
-            interval=params.PRICE_INTERVAL
+    # Get latest price data from Yahoo Finance
+    remaining_symbols = symbols.to_list()
+    consecutive_errors = 0
+    chunk_size = 100
+    max_errors = 10
+    while len(remaining_symbols) > 0 and consecutive_errors < max_errors:
+
+        # Choose 100 random symbols, pop from remaining symbols
+        _symbols = random.sample(
+            remaining_symbols,
+            min(chunk_size, len(remaining_symbols)),
         )
 
-    latest_price_data = pl.DataFrame(
-        pd_price_data.reset_index()
-    )
+        # Remove from remaining symbols
+        for _symbol in _symbols:
+            remaining_symbols.remove(_symbol)
 
-    # Validate and trim price data
-    latest_price_data = latest_price_data.select(SecurityPrices.__annotations__.keys())
-    latest_price_data: pl.DataFrame = SecurityPrices.validate(latest_price_data) # type: ignore
+        stock_data = yq.Ticker(_symbols)
 
-    # Append new price data to db
-    _append_data(
-        uri=uri,
-        table_name='security_price',
-        new_data=latest_price_data,
-        pk=['symbol', 'date']
-    )
+        try:
+            msg = (
+                f"Fetching price data for {len(_symbols)} of "
+                f"{len(remaining_symbols)} remaining symbols"
+            )
+            print(msg)
+
+            pd_price_data = stock_data.history(
+                period=params.PRICE_PERIOD,
+                interval=params.PRICE_INTERVAL
+            )
+            pl_price_data = pl.DataFrame(
+                pd_price_data.reset_index()
+            )
+
+            # Validate and trim price data
+            latest_price_data = pl_price_data.select(
+                SecurityPrices.__annotations__.keys(),
+            )
+            latest_price_data: pl.DataFrame = SecurityPrices.validate(
+                latest_price_data, # type: ignore
+            )
+
+            # Append new price data to db
+            _append_data(
+                uri=uri,
+                table_name='security_price',
+                new_data=latest_price_data,
+                pk=['symbol', 'date']
+            )
+
+        except Exception as e:
+            # Put back into remaining symbols to retry
+            remaining_symbols.extend(_symbols)
+            msg = f"Error {consecutive_errors}/{max_errors} fetching price data."
+            print(msg)
+            consecutive_errors += 1
+
+            # If less than 100 left, reduce chunk size by half, minimum 1
+            if len(remaining_symbols) < chunk_size:
+                chunk_size = max(chunk_size // 2, 1)
+
+
