@@ -1,33 +1,21 @@
-[tool.poetry]
+[project]
 name = "data-pipeline"
 version = "0.1.0"
-description = ""
-authors = ["Nick Fournier <nichfournier@gmail.com>"]
+description = "Add your description here"
 readme = "README.md"
-packages = [
-    {include = "data_pipeline"}
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "connectorx>=0.4.1",
+    "dagster>=1.9.10",
+    "dagster-webserver>=1.9.10",
+    "pandera[polars]>=0.22.1",
+    "plotly>=5.24.1",
+    "polars>=1.21.0",
+    "pyportfolioopt>=1.5.6",
+    "ruff>=0.9.3",
+    "statsmodels>=0.14.4",
+    "yahooquery>=2.3.7",
 ]
-
-[tool.poetry.dependencies]
-python = ">=3.10,<3.13"
-dagster = "^1.7.10"
-dagster-webserver = "^1.7.10"
-polars = "^1.0"
-xlsx2csv = "^0.8.2"
-yahooquery = "^2.3.7"
-sshtunnel = "^0.4.0"
-connectorx = "^0.3.3"
-python-dotenv = "^1.0.1"
-dagster-postgres = "^0.23.10"
-ruff = "^0.4.10"
-pandera = {extras = ["strategies"], version = "^0.22.1"}
-pyarrow = "^18.0.0"
-scipy = "^1.14.1"
-scikit-learn = "^1.5.2"
-statsmodels = "^0.14.4"
-plotly = "^5.24.1"
-pyportfolioopt = "^1.5.6"
-pymc = "^5.20.0"
 
 [tool.ruff.lint]
 select = ["I", "E", "F", "W", "PL", "N", "RUF"]
@@ -35,10 +23,5 @@ select = ["I", "E", "F", "W", "PL", "N", "RUF"]
 [tool.ruff]
 line-length = 100
 
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
-
 [tool.dagster]
 module_name = "data_pipeline"
-
