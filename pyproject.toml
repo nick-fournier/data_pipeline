@@ -7,12 +7,16 @@ requires-python = ">=3.10,<3.13"
 dependencies = [
     "connectorx>=0.4.1",
     "dagster>=1.9.10",
+    "dagster-postgres>=0.25.10",
     "dagster-webserver>=1.9.10",
     "pandera[polars]>=0.22.1",
     "plotly>=5.24.1",
     "polars>=1.21.0",
+    "pyarrow>=19.0.0",
     "pyportfolioopt>=1.5.6",
     "ruff>=0.9.3",
+    "scikit-learn>=1.6.1",
+    "sshtunnel>=0.4.0",
     "statsmodels>=0.14.4",
     "yahooquery>=2.3.7",
 ]
