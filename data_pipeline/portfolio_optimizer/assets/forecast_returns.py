@@ -275,122 +275,47 @@ def prepare_data(
 
     return model_data
 
-
-@asset(
-    description="Forecasted expected returns for each security",
-    io_manager_key="pgio_manager",
-)
-def expected_returns(
-    context,
-    fundamentals: pl.DataFrame,
-    security_price: pl.DataFrame,
-    ) -> None:
+def process_forecast(
+    id,
+    symbol,
+    last_as_of_date,
+    security_price,
+    ) -> tuple[int, str, float, float, float, float] | None:
     """
-    Naive ARIMA model based on security price only
+    Helper function to process the forecast for a single security.
 
     Args:
-        fundamentals (pl.DataFrame): The financial fundamentals for each security
-        scores (pl.DataFrame): The Piotroski F-Score for each security
-        security_prices (pl.DataFrame): The monthly stock prices for each security
+        id (int): The fundamentals ID
+        symbol (str): The stock symbol
+        last_as_of_date (datetime.date): The last as of date
+        security_price (pl.DataFrame): The stock prices for each security
 
     Returns:
-        None - database updated
+        tuple: A tuple of
+            - fundamentals_id,
+            - symbol
+            - last close price,
+            - forecasted close price,
+            - expected return, and
+            - variance
     """
-    # Setup database connection
-    pg_config = context.resources.pgio_manager.postgres_config
+    price_df = security_price.filter(
+        (pl.col('symbol') == symbol) &
+        (pl.col('date') <= last_as_of_date),
+    )
 
-    # Model data
-    # model_data = prepare_data(fundamentals, scores, security_price)
+    # Skip if less than 3 months of data
+    min_months = 3
+    if price_df.shape[0] < min_months:
+        return None
 
-    # Fetch existing forecasts
     try:
-        existing_forecasts = pl.read_database_uri(
-            query="SELECT fundamentals_id FROM forecasted_returns",
-            uri=pg_config.db_uri(),
-        )
-    except RuntimeError:
-        existing_forecasts = pl.DataFrame(schema={'fundamentals_id': pl.Int64()})
+        return (id, symbol, *arima_forecast(price_df))
 
-    # Find which fundamentals_id are missing a forecasted value, excluding TTM
-    ood_fundamentals = fundamentals.filter(
-        ~pl.col('id').is_in(existing_forecasts['fundamentals_id']),
-        pl.col('period_type') == '3M',
-    )
+    except Exception as e:
+        print(f"Error processing {symbol}: {e}")
+        return None
 
-    # If empty, proceed, nothing to update
-    if ood_fundamentals.is_empty():
-        return
-
-    # Previous quarter end date
-    ood_fundamentals = ood_fundamentals.with_columns(
-        last_as_of_date=pl.col('as_of_date').shift(-1).over('symbol')
-    )
-
-    # Iterate over fundamentals
-    _iter = ood_fundamentals.select(['id', 'symbol', 'last_as_of_date']).iter_rows()
-    total = ood_fundamentals['id'].n_unique()
-    forecasts = []
-
-    def process_forecast(id, symbol, last_as_of_date, security_price):
-        price_df = security_price.filter(
-            (pl.col('symbol') == symbol) &
-            (pl.col('date') <= last_as_of_date),
-        )
-
-        # Skip if less than 3 months of data
-        if price_df.shape[0] < 3:
-            return None
-
-        try:
-            return (id, *arima_forecast(price_df))
-
-        except Exception as e:
-            print(f"Error processing {symbol}: {e}")
-            return None
-
-    # Process and populate the expected_returns dataframe
-    with ThreadPoolExecutor() as executor:
-        futures = [
-            executor.submit(process_forecast, id, symbol, last_as_of_date, security_price)
-            for id, symbol, last_as_of_date in tqdm(_iter, total=total)
-        ]
-
-        for future in tqdm(futures, total=total):
-            result = future.result()
-            if result:
-                forecasts.append(result)
-
-
-    # # Initialize empty dataframe to store forecasts using ExpectedReturns schema
-    schema = {k: v.type for k,v in ExpectedReturns.to_schema().dtypes.items()}
-
-    # Create a Polars DataFrame from the list of tuples
-    expected_returns = pl.DataFrame(
-        forecasts,
-        schema=schema,
-        orient='row',
-    )
-
-    # Drop rows where last_close or forecasted_close is NULL or not finite
-    expected_returns_clean = expected_returns.filter(
-        pl.col('last_close').is_finite(),
-        pl.col('forecasted_close').is_finite()
-    )
-
-    # Validate
-    expected_returns_clean: pl.DataFrame = ExpectedReturns.validate(
-        expected_returns_clean) # type: ignore
-
-    # Update database
-    _append_data(
-        uri=pg_config.db_uri(),
-        table_name="expected_returns",
-        new_data=expected_returns_clean,
-        pk=["fundamentals_id"],
-    )
-
-
-# Naive ARIMA model based on security price only
 def arima_forecast(price_df: pl.DataFrame) -> tuple:
     """Helper function to forecast using ARIMA model
 
@@ -439,4 +364,98 @@ def arima_forecast(price_df: pl.DataFrame) -> tuple:
         px.line(forecast_df, x='date', y='close', color='type').show()
 
     return (last_close, yhat, (yhat - last_close) / last_close, variance)
+
+
+@asset(
+    description="Forecasted expected returns for each security",
+    io_manager_key="pgio_manager",
+)
+def expected_returns(
+    context,
+    fundamentals: pl.DataFrame,
+    security_price: pl.DataFrame,
+    ) -> None:
+    """
+    Naive ARIMA model based on security price only
+
+    Args:
+        fundamentals (pl.DataFrame): The financial fundamentals for each security
+        scores (pl.DataFrame): The Piotroski F-Score for each security
+        security_prices (pl.DataFrame): The monthly stock prices for each security
+
+    Returns:
+        None - database updated
+    """
+    # Setup database connection
+    pg_config = context.resources.pgio_manager.postgres_config
+
+    # Fetch existing forecasts
+    try:
+        existing_forecasts = pl.read_database_uri(
+            query="SELECT fundamentals_id FROM forecasted_returns",
+            uri=pg_config.db_uri(),
+        )
+    except RuntimeError:
+        existing_forecasts = pl.DataFrame(schema={'fundamentals_id': pl.Int64()})
+
+    # Find which fundamentals_id are missing a forecasted value, excluding TTM
+    ood_fundamentals = fundamentals.filter(
+        ~pl.col('id').is_in(existing_forecasts['fundamentals_id']),
+        pl.col('period_type') == '3M',
+    )
+
+    # If empty, proceed, nothing to update
+    if ood_fundamentals.is_empty():
+        return
+
+    # Previous quarter end date
+    ood_fundamentals = ood_fundamentals.with_columns(
+        last_as_of_date=pl.col('as_of_date').shift(-1).over('symbol')
+    )
+
+    # Iterate over fundamentals
+    _iter = ood_fundamentals.select(['id', 'symbol', 'last_as_of_date']).iter_rows()
+    total = ood_fundamentals['id'].n_unique()
+    forecasts = []
+
+    # Process and populate the expected_returns dataframe
+    with ThreadPoolExecutor() as executor:
+        futures = [
+            executor.submit(process_forecast, id, symbol, last_as_of_date, security_price)
+            for id, symbol, last_as_of_date in tqdm(_iter, total=total)
+        ]
+
+        for future in tqdm(futures, total=total):
+            result = future.result()
+            if result:
+                forecasts.append(result)
+
+
+    # Initialize empty dataframe to store forecasts using ExpectedReturns schema
+    schema = {k: v.type for k,v in ExpectedReturns.to_schema().dtypes.items()}
+
+    # Create a Polars DataFrame from the list of tuples
+    expected_returns = pl.DataFrame(
+        forecasts,
+        schema=schema,
+        orient='row',
+    )
+
+    # Drop rows where last_close or forecasted_close is NULL or not finite
+    expected_returns_clean = expected_returns.filter(
+        pl.col('last_close').is_finite(),
+        pl.col('forecasted_close').is_finite()
+    )
+
+    # Validate
+    expected_returns_clean: pl.DataFrame = ExpectedReturns.validate(
+        expected_returns_clean) # type: ignore
+
+    # Update database
+    _append_data(
+        uri=pg_config.db_uri(),
+        table_name="expected_returns",
+        new_data=expected_returns_clean,
+        pk=["fundamentals_id"],
+    )
 

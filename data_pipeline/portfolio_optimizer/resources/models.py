@@ -248,6 +248,10 @@ class ExpectedReturns(pa.DataFrameModel):
         description="The fundamentals ID",
         nullable=False, coerce=True, unique=True,
         )
+    symbol: pl.String = pa.Field(
+        description="The stock symbol",
+        nullable=False,
+        )
     last_close: pl.Float64 = pa.Field(
         description="The last closing price of the stock",
         nullable=False, coerce=True,
@@ -263,10 +267,6 @@ class ExpectedReturns(pa.DataFrameModel):
     variance: pl.Float64 = pa.Field(
         description="The variance of the stock",
         nullable=True, coerce=True,
-        )
-    symbol: pl.String = pa.Field(
-        description="The stock symbol",
-        nullable=False,
         )
 
 
